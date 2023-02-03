@@ -15,7 +15,7 @@ type Set[T comparable] map[T]bool
 
 type opTree = ft.FingerTree[opMeasurer, operation, measure]
 
-type document struct {
+type Document struct {
 	ops opTree
 }
 
@@ -31,7 +31,7 @@ type operation interface {
 	opString(offset int) string
 	text() string
 	measure() measure
-	merge(doc *document, offset int)
+	merge(doc *Document, offset int)
 	fmt.Stringer
 }
 
@@ -63,7 +63,7 @@ type markerOp struct {
 /// set
 ///
 
-func newSet[T comparable](elements ...T) Set[T] {
+func NewSet[T comparable](elements ...T) Set[T] {
 	result := Set[T]{}
 	for _, item := range elements {
 		result[item] = true
@@ -79,28 +79,28 @@ func (m Set[T]) copy() Set[T] {
 	return result
 }
 
-func (m Set[T]) merge(m2 Set[T]) Set[T] {
+func (m Set[T]) Merge(m2 Set[T]) Set[T] {
 	for k, v := range m2 {
 		m[k] = v
 	}
 	return m
 }
 
-func (m Set[T]) union(m2 Set[T]) Set[T] {
+func (m Set[T]) Union(m2 Set[T]) Set[T] {
 	if len(m) == 0 {
 		return m
 	} else if len(m2) == 0 {
 		return m2
 	}
-	return m.copy().merge(m2)
+	return m.copy().Merge(m2)
 }
 
-func (m Set[T]) add(op T) Set[T] {
+func (m Set[T]) Add(op T) Set[T] {
 	m[op] = true
 	return m
 }
 
-func (m Set[T]) has(op T) bool {
+func (m Set[T]) Has(op T) bool {
 	return m[op]
 }
 
@@ -120,7 +120,7 @@ func (m opMeasurer) Sum(a measure, b measure) measure {
 	return measure{
 		oldLen:  a.oldLen + b.oldLen,
 		newLen:  a.newLen + b.newLen,
-		markers: a.markers.union(b.markers),
+		markers: a.markers.Union(b.markers),
 	}
 }
 
@@ -144,7 +144,7 @@ func (r *retainOp) measure() measure {
 	return measure{oldLen: len(r._text), newLen: len(r._text)}
 }
 
-func (r *retainOp) merge(doc *document, offset int) {
+func (r *retainOp) merge(doc *Document, offset int) {
 	// ignore this, it doesn't change the doc
 }
 
@@ -164,7 +164,7 @@ func (d *deleteOp) measure() measure {
 	return measure{oldLen: len(d._text)}
 }
 
-func (d *deleteOp) merge(doc *document, offset int) {
+func (d *deleteOp) merge(doc *Document, offset int) {
 	left, right := splitOld(doc.ops, offset)
 	for {
 		if right.IsEmpty() {
@@ -200,7 +200,7 @@ func (d *deleteOp) merge(doc *document, offset int) {
 			d = &deleteOp{d._text[len(first._text):]}
 			// make another pass through the loop
 		default:
-			// an insert or selection should not be the first right operation
+			// an insert or marker should not be the first right operation
 			panic(fmt.Errorf("Invalid operation during merge: %v", first))
 		}
 	}
@@ -222,7 +222,7 @@ func (i *insertOp) measure() measure {
 	return measure{newLen: len(i._text)}
 }
 
-func (i *insertOp) merge(doc *document, offset int) {
+func (i *insertOp) merge(doc *Document, offset int) {
 	// splitOld returns the first right as a retain or delete
 	// push any trailing inserts onto the right
 	left, right := shiftInsertsRight(splitOld(doc.ops, offset))
@@ -269,10 +269,10 @@ func (s *markerOp) text() string {
 }
 
 func (s *markerOp) measure() measure {
-	return measure{markers: newSet(s.name)}
+	return measure{markers: NewSet(s.name)}
 }
 
-func (s *markerOp) merge(doc *document, offset int) {
+func (s *markerOp) merge(doc *Document, offset int) {
 	left, right := splitOld(doc.ops, offset)
 	for {
 		if right.IsEmpty() {
@@ -297,7 +297,7 @@ func newOpTree(ops ...operation) opTree {
 	return ft.FromArray[opMeasurer, operation, measure](opMeasurer(true), ops)
 }
 
-func newDocument(text ...string) *document {
+func newDocument(text ...string) *Document {
 	sb := &strings.Builder{}
 	var ops opTree
 	if len(text) > 0 {
@@ -308,22 +308,22 @@ func newDocument(text ...string) *document {
 	} else {
 		ops = newOpTree()
 	}
-	return &document{
+	return &Document{
 		ops: ops,
 	}
 }
 
-func (d *document) Copy() *document {
+func (d *Document) Copy() *Document {
 	d2 := *d
 	return &d2
 }
 
-func (d *document) Freeze() *document {
+func (d *Document) Freeze() *Document {
 	return newDocument(d.String())
 }
 
 // string for the new document
-func (d *document) String() string {
+func (d *Document) String() string {
 	sb := &strings.Builder{}
 	for _, item := range d.ops.ToSlice() {
 		fmt.Fprint(sb, item)
@@ -332,7 +332,7 @@ func (d *document) String() string {
 }
 
 // string for the original document
-func (d *document) OriginalString() string {
+func (d *Document) OriginalString() string {
 	sb := &strings.Builder{}
 	for _, item := range d.ops.ToSlice() {
 		switch op := item.(type) {
@@ -343,7 +343,7 @@ func (d *document) OriginalString() string {
 	return sb.String()
 }
 
-func (d *document) opString() string {
+func (d *Document) opString() string {
 	sb := &strings.Builder{}
 	pos := 0
 	first := true
@@ -463,33 +463,15 @@ func shiftDeletesRight(left opTree, right opTree) (opTree, opTree) {
 	return left, right
 }
 
-func removeMarker(tree opTree, name string) opTree {
-	left, right := splitOnMarker(tree, name)
+func RemoveMarker(tree opTree, name string) opTree {
+	left, right := SplitOnMarker(tree, name)
 	if !right.IsEmpty() {
 		tree = left.Concat(right.RemoveFirst())
 	}
 	return tree
 }
 
-// set the selection for peer
-func (d *document) selection(peer string, start int, length int) {
-	// remove old selection for peer if there is one
-	tree := removeMarker(d.ops, selectionStart(peer))
-	tree = removeMarker(d.ops, selectionEnd(peer))
-	left, right := tree.Split(func(m measure) bool {
-		return m.newLen > start
-	})
-	mid, end := right.Split(func(m measure) bool {
-		return m.newLen > length
-	})
-	d.ops = left.
-		AddLast(&markerOp{selectionStart(peer)}).
-		Concat(mid).
-		AddLast(&markerOp{selectionEnd(peer)}).
-		Concat(end)
-}
-
-func (d *document) replace(peer string, start int, length int, str string) {
+func (d *Document) Replace(peer string, start int, length int, str string) {
 	// the left mid value should be a string if mid is nonempty
 	left, right := splitNew(d.ops, start)
 	if length > 0 {
@@ -533,8 +515,8 @@ func (d *document) replace(peer string, start int, length int, str string) {
 	d.ops = left.Concat(right)
 }
 
-// merge operations from the same ancestor document into this one
-func (a *document) merge(b *document) {
+// Merge operations from the same ancestor document into this one
+func (a *Document) Merge(b *Document) {
 	offset := 0
 	b.ops.Each(func(op operation) bool {
 		op.merge(a, offset)
@@ -543,39 +525,18 @@ func (a *document) merge(b *document) {
 	})
 }
 
-func splitOnMarker(tree opTree, name string) (opTree, opTree) {
+func SplitOnMarker(tree opTree, name string) (opTree, opTree) {
 	return tree.Split(func(m measure) bool {
-		return m.markers.has(name)
+		return m.markers.Has(name)
 	})
 }
 
-func selectionStart(peer string) string {
-	return fmt.Sprint(peer, ".sel.start")
-}
-
-func selectionEnd(peer string) string {
-	return fmt.Sprint(peer, ".sel.end")
-}
-
-func (d *document) splitOnMarker(name string) (opTree, opTree) {
-	return splitOnMarker(d.ops, name)
-}
-
-func (d *document) getSelection(peer string) (int, int) {
-	left, right := d.splitOnMarker(selectionStart(peer))
-	if !right.IsEmpty() {
-		if _, ok := right.PeekFirst().(*markerOp); ok {
-			mid, end := d.splitOnMarker(selectionEnd(peer))
-			if _, ok := end.PeekFirst().(*markerOp); ok {
-				return left.Measure().newLen, mid.Measure().newLen
-			}
-		}
-	}
-	return -1, -1
+func (d *Document) SplitOnMarker(name string) (opTree, opTree) {
+	return SplitOnMarker(d.ops, name)
 }
 
 // append edits that restore the original document
-func (d *document) reverseEdits() []Replacement {
+func (d *Document) ReverseEdits() []Replacement {
 	edits := make([]Replacement, 0, 8)
 	docLen := d.ops.Measure().newLen
 	d.ops.EachReverse(func(op operation) bool {
@@ -592,8 +553,8 @@ func (d *document) reverseEdits() []Replacement {
 	return edits
 }
 
-// append edits that restore the original document
-func (d *document) edits() []Replacement {
+// append Edits that restore the original document
+func (d *Document) Edits() []Replacement {
 	edits := make([]Replacement, 0, 8)
 	offset := 0
 	d.ops.Each(func(op operation) bool {
@@ -609,14 +570,14 @@ func (d *document) edits() []Replacement {
 	return edits
 }
 
-func (d *document) apply(peer string, edits []Replacement) {
+func (d *Document) Apply(peer string, edits []Replacement) {
 	for _, repl := range edits {
-		d.replace(peer, repl.Offset, repl.Length, repl.Text)
+		d.Replace(peer, repl.Offset, repl.Length, repl.Text)
 	}
 }
 
 func Apply(peer, str string, repl []Replacement) string {
 	doc := newDocument(peer, str)
-	doc.apply(peer, repl)
+	doc.Apply(peer, repl)
 	return doc.String()
 }
