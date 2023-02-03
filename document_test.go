@@ -22,13 +22,6 @@ func testEqual(t *testing.T, actual any, expected any, msg string) {
 	failIfNot(t, actual == expected, fmt.Sprintf("%s: expected <%v> but got <%v>", msg, expected, actual))
 }
 
-func testEqualRepls(t *testing.T, repl1, repl2 []Replacement, msg string) {
-	testEqual(t, len(repl1), len(repl2), msg)
-	for i, repl := range repl1 {
-		testEqual(t, repl, repl2[i], msg)
-	}
-}
-
 func failIfNot(t *testing.T, cond bool, msg string) {
 	if !cond {
 		t.Log(msg)
@@ -45,20 +38,6 @@ func failIfErrNow(t *testing.T, err any) {
 		debug.PrintStack()
 		t.FailNow()
 	}
-}
-
-func nth(tree OpTree, n int) Operation {
-	count := 0
-	var item Operation
-	tree.Each(func(op Operation) bool {
-		if count == n {
-			item = op
-			return false
-		}
-		count++
-		return true
-	})
-	return item
 }
 
 func TestDoc(t *testing.T) {
