@@ -11,7 +11,7 @@ import (
 /// types
 ///
 
-type set[T comparable] map[T]bool
+type Set[T comparable] map[T]bool
 
 type opTree = ft.FingerTree[opMeasurer, operation, measure]
 
@@ -38,7 +38,7 @@ type operation interface {
 type measure struct {
 	oldLen  int
 	newLen  int
-	markers set[string]
+	markers Set[string]
 }
 
 type retainOp struct {
@@ -63,30 +63,30 @@ type markerOp struct {
 /// set
 ///
 
-func newSet[T comparable](elements ...T) set[T] {
-	result := set[T]{}
+func newSet[T comparable](elements ...T) Set[T] {
+	result := Set[T]{}
 	for _, item := range elements {
 		result[item] = true
 	}
 	return result
 }
 
-func (m set[T]) copy() set[T] {
-	result := set[T]{}
+func (m Set[T]) copy() Set[T] {
+	result := Set[T]{}
 	for k, v := range m {
 		result[k] = v
 	}
 	return result
 }
 
-func (m set[T]) merge(m2 set[T]) set[T] {
+func (m Set[T]) merge(m2 Set[T]) Set[T] {
 	for k, v := range m2 {
 		m[k] = v
 	}
 	return m
 }
 
-func (m set[T]) union(m2 set[T]) set[T] {
+func (m Set[T]) union(m2 Set[T]) Set[T] {
 	if len(m) == 0 {
 		return m
 	} else if len(m2) == 0 {
@@ -95,12 +95,12 @@ func (m set[T]) union(m2 set[T]) set[T] {
 	return m.copy().merge(m2)
 }
 
-func (m set[T]) add(op T) set[T] {
+func (m Set[T]) add(op T) Set[T] {
 	m[op] = true
 	return m
 }
 
-func (m set[T]) has(op T) bool {
+func (m Set[T]) has(op T) bool {
 	return m[op]
 }
 
