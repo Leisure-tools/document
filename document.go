@@ -50,12 +50,12 @@ type DeleteOp struct {
 	// could put a pointer to a "move" operation here if text has moved
 }
 
-type insertOp struct {
+type InsertOp struct {
 	Peer string // used for ordering
 	Text string
 }
 
-type markerOp struct {
+type MarkerOp struct {
 	Name string
 }
 
@@ -206,23 +206,23 @@ func (d *DeleteOp) Merge(doc *Document, offset int) {
 	}
 }
 
-func (i *insertOp) String() string {
+func (i *InsertOp) String() string {
 	return i.Text
 }
 
-func (i *insertOp) OpString(offset int) string {
+func (i *InsertOp) OpString(offset int) string {
 	return fmt.Sprintf("insert[%s](%d, '%s')", i.Peer, offset, i.Text)
 }
 
-func (i *insertOp) GetText() string {
+func (i *InsertOp) GetText() string {
 	return i.Text
 }
 
-func (i *insertOp) Measure() Measure {
+func (i *InsertOp) Measure() Measure {
 	return Measure{NewLen: len(i.Text)}
 }
 
-func (i *insertOp) Merge(doc *Document, offset int) {
+func (i *InsertOp) Merge(doc *Document, offset int) {
 	// splitOld returns the first right as a retain or delete
 	// push any trailing inserts onto the right
 	left, right := ShiftInsertsRight(SplitOld(doc.Ops, offset))
@@ -232,7 +232,7 @@ func (i *insertOp) Merge(doc *Document, offset int) {
 			return
 		}
 		switch first := right.PeekFirst().(type) {
-		case *insertOp:
+		case *InsertOp:
 			if i.Peer < first.Peer {
 				doc.Ops = left.AddLast(i).Concat(right)
 				return
@@ -247,7 +247,7 @@ func (i *insertOp) Merge(doc *Document, offset int) {
 			left = left.AddLast(first)
 			right = right.RemoveFirst()
 			// make another pass through the loop
-		case *markerOp:
+		case *MarkerOp:
 			doc.Ops = left.AddLast(i).Concat(right)
 			return
 		default:
@@ -256,23 +256,23 @@ func (i *insertOp) Merge(doc *Document, offset int) {
 	}
 }
 
-func (s *markerOp) String() string {
+func (s *MarkerOp) String() string {
 	return ""
 }
 
-func (s *markerOp) OpString(offset int) string {
+func (s *MarkerOp) OpString(offset int) string {
 	return fmt.Sprintf("marker(%s, %d)", s.Name, offset)
 }
 
-func (s *markerOp) GetText() string {
+func (s *MarkerOp) GetText() string {
 	return ""
 }
 
-func (s *markerOp) Measure() Measure {
+func (s *MarkerOp) Measure() Measure {
 	return Measure{Markers: NewSet(s.Name)}
 }
 
-func (s *markerOp) Merge(doc *Document, offset int) {
+func (s *MarkerOp) Merge(doc *Document, offset int) {
 	left, right := SplitOld(doc.Ops, offset)
 	for {
 		if right.IsEmpty() {
@@ -280,10 +280,10 @@ func (s *markerOp) Merge(doc *Document, offset int) {
 			return
 		}
 		switch first := right.PeekFirst().(type) {
-		case *insertOp, *DeleteOp:
+		case *InsertOp, *DeleteOp:
 			left = left.AddLast(first)
 			right = right.RemoveFirst()
-		case *RetainOp, *markerOp:
+		case *RetainOp, *MarkerOp:
 			doc.Ops = left.AddLast(s).Concat(right)
 		}
 	}
@@ -408,9 +408,9 @@ func SplitNew(tree opTree, offset int) (opTree, opTree) {
 		case *RetainOp:
 			left = left.AddLast(&RetainOp{first.Text[:splitPoint]})
 			right = right.AddFirst(&RetainOp{first.Text[splitPoint:]})
-		case *insertOp:
-			left = left.AddLast(&insertOp{first.Peer, first.Text[:splitPoint]})
-			right = right.AddFirst(&insertOp{first.Peer, first.Text[splitPoint:]})
+		case *InsertOp:
+			left = left.AddLast(&InsertOp{first.Peer, first.Text[:splitPoint]})
+			right = right.AddFirst(&InsertOp{first.Peer, first.Text[splitPoint:]})
 		default:
 			panic(fmt.Errorf("bad value at split point %d: %v", splitPoint, first))
 		}
@@ -429,10 +429,10 @@ func ShiftInsertsRight(left opTree, right opTree) (opTree, opTree) {
 	found := false
 	for !l.IsEmpty() {
 		switch op := l.PeekLast().(type) {
-		case *markerOp, *insertOp:
+		case *MarkerOp, *InsertOp:
 			l = l.RemoveLast()
 			r = r.AddFirst(op)
-			found = found || Isa[*insertOp](op)
+			found = found || Isa[*InsertOp](op)
 			continue
 		}
 		break
@@ -449,7 +449,7 @@ func ShiftDeletesRight(left opTree, right opTree) (opTree, opTree) {
 	found := false
 	for !l.IsEmpty() {
 		switch op := l.PeekLast().(type) {
-		case *markerOp, *DeleteOp:
+		case *MarkerOp, *DeleteOp:
 			l = l.RemoveLast()
 			r = r.AddFirst(op)
 			found = found || Isa[*DeleteOp](op)
@@ -492,7 +492,7 @@ func (d *Document) Replace(peer string, start int, length int, str string) {
 			case *RetainOp, *DeleteOp:
 				// coalesce retains and deletes into a single delete
 				fmt.Fprint(sb, o.GetText())
-			case *insertOp:
+			case *InsertOp:
 				// chuck inserts
 			default:
 				// gather markers after the delete
@@ -510,7 +510,7 @@ func (d *Document) Replace(peer string, start int, length int, str string) {
 		left = left.AddLast(&DeleteOp{sb.String()}).Concat(mid)
 	}
 	if len(str) > 0 {
-		right = right.AddFirst(&insertOp{peer, str})
+		right = right.AddFirst(&InsertOp{peer, str})
 	}
 	d.Ops = left.Concat(right)
 }
@@ -544,7 +544,7 @@ func (d *Document) ReverseEdits() []Replacement {
 		switch op := op.(type) {
 		case *DeleteOp:
 			edits = append(edits, Replacement{Offset: docLen, Length: 0, Text: op.Text})
-		case *insertOp:
+		case *InsertOp:
 			edits = append(edits, Replacement{Offset: docLen - width, Length: len(op.Text), Text: ""})
 		}
 		docLen -= width
@@ -561,7 +561,7 @@ func (d *Document) Edits() []Replacement {
 		switch op := op.(type) {
 		case *DeleteOp:
 			edits = append(edits, Replacement{Offset: offset, Length: len(op.Text), Text: ""})
-		case *insertOp:
+		case *InsertOp:
 			edits = append(edits, Replacement{Offset: offset, Length: 0, Text: op.Text})
 		}
 		offset += op.Measure().NewLen
