@@ -47,10 +47,10 @@ func failIfErrNow(t *testing.T, err any) {
 	}
 }
 
-func nth(tree opTree, n int) operation {
+func nth(tree opTree, n int) Operation {
 	count := 0
-	var item operation
-	tree.Each(func(op operation) bool {
+	var item Operation
+	tree.Each(func(op Operation) bool {
 		if count == n {
 			item = op
 			return false
@@ -62,10 +62,10 @@ func nth(tree opTree, n int) operation {
 }
 
 func TestDoc(t *testing.T) {
-	doc := newDocument("aaaaa")
+	doc := NewDocument("aaaaa")
 	replace(t, doc, "peer", 0, 0, "hello")
 	replace(t, doc, "peer", 1, 2, "d")
-	doc = newDocument("aaaaa")
+	doc = NewDocument("aaaaa")
 	replace(t, doc, "peer", 3, 1, "hello")
 	replace(t, doc, "peer", 2, 2, "")
 	replace(t, doc, "peer", 0, 0, "bbb")
@@ -93,14 +93,14 @@ func index(str string, line, col int) int {
 }
 
 func docONE(t *testing.T, peer string) *Document {
-	doc := newDocument(doc1)
+	doc := NewDocument(doc1)
 	replace(t, doc, peer, index(doc1, 0, 5), 3, "ONE")
 	replace(t, doc, peer, index(doc1, 2, 10), 0, "\nline four")
 	return doc
 }
 
 func docTWO(t *testing.T, peer string) *Document {
-	doc := newDocument(doc1)
+	doc := NewDocument(doc1)
 	replace(t, doc, peer, index(doc1, 1, 5), 3, "TWO")
 	replace(t, doc, peer, index(doc1, 2, 10), 0, "\nline five")
 	return doc
@@ -118,7 +118,7 @@ func TestMerge(t *testing.T) {
 	b.Merge(a)
 	bDoc := b.String()
 	testEqual(t, bDoc, docMerged, "unsuccessful merge")
-	revDoc := newDocument(bDoc)
+	revDoc := NewDocument(bDoc)
 	for _, r := range b.ReverseEdits() {
 		replace(t, revDoc, "peer1", r.Offset, r.Length, r.Text)
 	}
