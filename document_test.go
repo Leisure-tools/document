@@ -47,7 +47,7 @@ func failIfErrNow(t *testing.T, err any) {
 	}
 }
 
-func nth(tree opTree, n int) Operation {
+func nth(tree OpTree, n int) Operation {
 	count := 0
 	var item Operation
 	tree.Each(func(op Operation) bool {

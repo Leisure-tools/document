@@ -13,10 +13,10 @@ import (
 
 type Set[T comparable] map[T]bool
 
-type opTree = ft.FingerTree[OpMeasurer, Operation, Measure]
+type OpTree = ft.FingerTree[OpMeasurer, Operation, Measure]
 
 type Document struct {
-	Ops opTree
+	Ops OpTree
 }
 
 type Replacement struct {
@@ -293,13 +293,13 @@ func (s *MarkerOp) Merge(doc *Document, offset int) {
 /// document
 ///
 
-func newOpTree(ops ...Operation) opTree {
+func newOpTree(ops ...Operation) OpTree {
 	return ft.FromArray[OpMeasurer, Operation, Measure](OpMeasurer(true), ops)
 }
 
 func NewDocument(text ...string) *Document {
 	sb := &strings.Builder{}
-	var ops opTree
+	var ops OpTree
 	if len(text) > 0 {
 		for _, t := range text {
 			fmt.Fprint(sb, t)
@@ -367,7 +367,7 @@ func As[T any](v any) T {
 }
 
 // split the tree's old text at an offset
-func SplitOld(tree opTree, offset int) (opTree, opTree) {
+func SplitOld(tree OpTree, offset int) (OpTree, OpTree) {
 	if offset > tree.Measure().OldLen {
 		panic(fmt.Errorf("Split point %d is not within doc of length %d", offset, tree.Measure().OldLen))
 	}
@@ -392,7 +392,7 @@ func SplitOld(tree opTree, offset int) (opTree, opTree) {
 }
 
 // SplitNew the tree's new text at an offset
-func SplitNew(tree opTree, offset int) (opTree, opTree) {
+func SplitNew(tree OpTree, offset int) (OpTree, OpTree) {
 	if offset > tree.Measure().NewLen {
 		panic(fmt.Errorf("Split point %d is not within doc of length %d", offset, tree.Measure().NewLen))
 	}
@@ -424,7 +424,7 @@ func Isa[T any](v any) bool {
 }
 
 // if left ends in inserts and (optionally) markers, shift them to right
-func ShiftInsertsRight(left opTree, right opTree) (opTree, opTree) {
+func ShiftInsertsRight(left OpTree, right OpTree) (OpTree, OpTree) {
 	l, r := left, right
 	found := false
 	for !l.IsEmpty() {
@@ -444,7 +444,7 @@ func ShiftInsertsRight(left opTree, right opTree) (opTree, opTree) {
 }
 
 // if left ends in deletes and (optionally) markers, shift them to right
-func ShiftDeletesRight(left opTree, right opTree) (opTree, opTree) {
+func ShiftDeletesRight(left OpTree, right OpTree) (OpTree, OpTree) {
 	l, r := left, right
 	found := false
 	for !l.IsEmpty() {
@@ -463,7 +463,7 @@ func ShiftDeletesRight(left opTree, right opTree) (opTree, opTree) {
 	return left, right
 }
 
-func RemoveMarker(tree opTree, name string) opTree {
+func RemoveMarker(tree OpTree, name string) OpTree {
 	left, right := SplitOnMarker(tree, name)
 	if !right.IsEmpty() {
 		tree = left.Concat(right.RemoveFirst())
@@ -485,7 +485,7 @@ func (d *Document) Replace(peer string, start int, length int, str string) {
 			fmt.Fprint(sb, del.Text)
 			mid = mid.RemoveFirst()
 		}
-		var del opTree
+		var del OpTree
 		del, right = SplitNew(right, length)
 		del.Each(func(v Operation) bool {
 			switch o := v.(type) {
@@ -525,13 +525,13 @@ func (a *Document) Merge(b *Document) {
 	})
 }
 
-func SplitOnMarker(tree opTree, name string) (opTree, opTree) {
+func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
 	return tree.Split(func(m Measure) bool {
 		return m.Markers.Has(name)
 	})
 }
 
-func (d *Document) SplitOnMarker(name string) (opTree, opTree) {
+func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
 	return SplitOnMarker(d.Ops, name)
 }
 
