@@ -31,7 +31,7 @@ type Operation interface {
 	OpString(offset int) string
 	GetText() string
 	Measure() Measure
-	Merge(doc *Document, offset int)
+	Merge(m *Merger) bool
 	fmt.Stringer
 }
 
@@ -133,7 +133,7 @@ func (r *RetainOp) String() string {
 }
 
 func (r *RetainOp) OpString(offset int) string {
-	return fmt.Sprintf("retain(%d, '%s')", offset, r.Text)
+	return fmt.Sprintf("retain[%d](%d, '%s')", len(r.Text), offset, r.Text)
 }
 
 func (r *RetainOp) GetText() string {
@@ -144,8 +144,18 @@ func (r *RetainOp) Measure() Measure {
 	return Measure{OldLen: len(r.Text), NewLen: len(r.Text)}
 }
 
-func (r *RetainOp) Merge(doc *Document, offset int) {
-	// ignore this, it doesn't change the doc
+func (r *RetainOp) Merge(m *Merger) bool {
+	// only called when both are retains
+	opB, _ := m.Fb.(*RetainOp)
+	if len(r.Text) > len(opB.Text) {
+		m.swap()
+		r, opB = opB, r
+	}
+	m.appendOps(r)
+	if len(r.Text) < len(opB.Text) {
+		return m.shiftA(&RetainOp{opB.Text[len(r.Text):]})
+	}
+	return m.shiftBoth()
 }
 
 func (d *DeleteOp) String() string {
@@ -153,7 +163,7 @@ func (d *DeleteOp) String() string {
 }
 
 func (d *DeleteOp) OpString(offset int) string {
-	return fmt.Sprintf("delete(%d, %d)", offset, len(d.Text))
+	return fmt.Sprintf("delete[%d](%d, %d)", len(d.Text), offset, len(d.Text))
 }
 
 func (d *DeleteOp) GetText() string {
@@ -164,45 +174,35 @@ func (d *DeleteOp) Measure() Measure {
 	return Measure{OldLen: len(d.Text)}
 }
 
-func (d *DeleteOp) Merge(doc *Document, offset int) {
-	left, right := SplitOld(doc.Ops, offset)
-	for {
-		if right.IsEmpty() {
-			doc.Ops = left.AddLast(d)
-			return
-		}
-		switch first := right.PeekFirst().(type) {
-		case *DeleteOp:
-			if len(first.Text) >= len(d.Text) {
-				// same text has already been deleted
-				return
+func (d *DeleteOp) Merge(m *Merger) bool {
+	switch opB := m.Fb.(type) {
+	case *RetainOp:
+		if len(d.Text) > len(opB.Text) {
+			m.addDelete(d.Text[0:len(opB.Text)])
+			m.swap()
+			return m.shiftA(&DeleteOp{d.Text[len(opB.Text):]})
+		} else {
+			m.addDelete(d.Text)
+			if len(d.Text) < len(opB.Text) {
+				return m.shiftA(&RetainOp{opB.Text[len(d.Text):]})
+			} else {
+				return m.shiftBoth()
 			}
-			// doc has deleted the first part of this text, continue with rest of delete
-			d = &DeleteOp{d.Text[len(first.Text):]}
-			left = left.AddLast(first)
-			right = right.RemoveFirst()
-			// make another pass through the loop
-		case *RetainOp:
-			// remove the retain
-			right = right.RemoveFirst()
-			if len(first.Text) >= len(d.Text) {
-				// the entire deleted text is still in the doc, add the deletion
-				if len(first.Text) > len(d.Text) {
-					// keep any remaining retained text
-					right = right.AddFirst(&RetainOp{first.Text[len(d.Text):]})
-				}
-				doc.Ops = left.AddLast(d).Concat(right)
-				return
-			}
-			// the first part of the deletion is still in the doc
-			left = left.AddLast(&DeleteOp{d.Text[:len(first.Text)]})
-			// continue with rest of delete
-			d = &DeleteOp{d.Text[len(first.Text):]}
-			// make another pass through the loop
-		default:
-			// an insert or marker should not be the first right operation
-			panic(fmt.Errorf("Invalid operation during merge: %v", first))
 		}
+	case *DeleteOp:
+		if len(d.Text) > len(opB.Text) {
+			m.swap()
+			d, opB = opB, d
+		}
+		m.addDelete(d.Text)
+		if len(d.Text) < len(opB.Text) {
+			return m.shiftA(&DeleteOp{opB.Text[len(d.Text):]})
+		} else {
+			return m.shiftBoth()
+		}
+	default:
+		m.addDelete(d.Text)
+		return m.shiftA(opB)
 	}
 }
 
@@ -211,7 +211,7 @@ func (i *InsertOp) String() string {
 }
 
 func (i *InsertOp) OpString(offset int) string {
-	return fmt.Sprintf("insert[%s](%d, '%s')", i.Peer, offset, i.Text)
+	return fmt.Sprintf("insert[%s, %d](%d, '%s')", i.Peer, len(i.Text), offset, i.Text)
 }
 
 func (i *InsertOp) GetText() string {
@@ -222,37 +222,23 @@ func (i *InsertOp) Measure() Measure {
 	return Measure{NewLen: len(i.Text)}
 }
 
-func (i *InsertOp) Merge(doc *Document, offset int) {
-	// splitOld returns the first right as a retain or delete
-	// push any trailing inserts onto the right
-	left, right := ShiftInsertsRight(SplitOld(doc.Ops, offset))
-	for {
-		if right.IsEmpty() {
-			doc.Ops = left.AddLast(i)
-			return
+func (i *InsertOp) Merge(m *Merger) bool {
+	switch opB := m.Fb.(type) {
+	case *RetainOp:
+		m.appendOps(i)
+		return m.shiftA(opB)
+	case *DeleteOp:
+		m.swap() // handle in the delete case above
+		return true
+	case *InsertOp:
+		if i.Peer > opB.Peer {
+			m.swap()
+			i, opB = opB, i
 		}
-		switch first := right.PeekFirst().(type) {
-		case *InsertOp:
-			if i.Peer < first.Peer {
-				doc.Ops = left.AddLast(i).Concat(right)
-				return
-			}
-			left = left.AddLast(first)
-			right = right.RemoveFirst()
-			// make another pass through the loop
-		case *RetainOp:
-			doc.Ops = left.AddLast(i).Concat(right)
-			return
-		case *DeleteOp:
-			left = left.AddLast(first)
-			right = right.RemoveFirst()
-			// make another pass through the loop
-		case *MarkerOp:
-			doc.Ops = left.AddLast(i).Concat(right)
-			return
-		default:
-			panic(fmt.Errorf("Illegal operation: %v", first))
-		}
+		return m.shiftBoth(i, opB)
+	default:
+		m.appendOps(i)
+		return m.shiftA(opB)
 	}
 }
 
@@ -272,20 +258,16 @@ func (s *MarkerOp) Measure() Measure {
 	return Measure{Markers: NewSet(s.Name)}
 }
 
-func (s *MarkerOp) Merge(doc *Document, offset int) {
-	left, right := SplitOld(doc.Ops, offset)
-	for {
-		if right.IsEmpty() {
-			doc.Ops = left.AddLast(s)
-			return
-		}
-		switch first := right.PeekFirst().(type) {
-		case *InsertOp, *DeleteOp:
-			left = left.AddLast(first)
-			right = right.RemoveFirst()
-		case *RetainOp, *MarkerOp:
-			doc.Ops = left.AddLast(s).Concat(right)
-		}
+func (opA *MarkerOp) Merge(m *Merger) bool {
+	switch opB := m.Fb.(type) {
+	case *RetainOp:
+		m.appendOps(opA)
+		return m.shiftA(opB)
+	case *DeleteOp, *InsertOp:
+		m.swap() // handle in the case above
+		return true
+	default:
+		return m.shiftBoth(opA, opB)
 	}
 }
 
@@ -343,11 +325,11 @@ func (d *Document) OriginalString() string {
 	return sb.String()
 }
 
-func (d *Document) OpString() string {
+func OpString(tree OpTree) string {
 	sb := &strings.Builder{}
 	pos := 0
 	first := true
-	for _, item := range d.Ops.ToSlice() {
+	for _, item := range tree.ToSlice() {
 		if first {
 			first = false
 		} else {
@@ -359,6 +341,10 @@ func (d *Document) OpString() string {
 	return sb.String()
 }
 
+func (d *Document) OpString() string {
+	return OpString(d.Ops)
+}
+
 func As[T any](v any) T {
 	if tv, ok := v.(T); ok {
 		return tv
@@ -368,7 +354,7 @@ func As[T any](v any) T {
 
 // split the tree's old text at an offset
 func SplitOld(tree OpTree, offset int) (OpTree, OpTree) {
-	if offset > tree.Measure().OldLen {
+	if offset > tree.Measure().OldLen+1 {
 		panic(fmt.Errorf("Split point %d is not within doc of length %d", offset, tree.Measure().OldLen))
 	}
 	left, right := tree.Split(func(m Measure) bool {
@@ -393,7 +379,7 @@ func SplitOld(tree OpTree, offset int) (OpTree, OpTree) {
 
 // SplitNew the tree's new text at an offset
 func SplitNew(tree OpTree, offset int) (OpTree, OpTree) {
-	if offset > tree.Measure().NewLen {
+	if offset > tree.Measure().NewLen+1 {
 		panic(fmt.Errorf("Split point %d is not within doc of length %d", offset, tree.Measure().NewLen))
 	}
 	left, right := tree.Split(func(m Measure) bool {
@@ -515,14 +501,78 @@ func (d *Document) Replace(peer string, start int, length int, str string) {
 	d.Ops = left.Concat(right)
 }
 
-// Merge operations from the same ancestor document into this one
-func (a *Document) Merge(b *Document) {
-	offset := 0
-	b.Ops.Each(func(op Operation) bool {
-		op.Merge(a, offset)
-		offset += op.Measure().OldLen
+type Merger struct {
+	Doc    *Document
+	Ops    []Operation
+	Fa, Fb Operation
+	Ta, Tb ft.FingerTree[OpMeasurer, Operation, Measure]
+}
+
+func (d *Document) Merge(b *Document) {
+	(&Merger{
+		Doc: d,
+		Ops: make([]Operation, 0, 8),
+		Ta:  d.Ops,
+		Tb:  b.Ops,
+	}).merge(d, b)
+}
+
+func (m *Merger) swap() {
+	m.Fa, m.Ta, m.Fb, m.Tb = m.Fb, m.Tb, m.Fa, m.Ta
+}
+
+func (m *Merger) shiftBoth(newOps ...Operation) bool {
+	m.appendOps(newOps...)
+	if m.Ta.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Tb)
+	} else if m.Tb.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Ta)
+	} else {
+		m.Fa = m.Ta.PeekFirst()
+		m.Ta = m.Ta.RemoveFirst()
+		m.Fb = m.Tb.PeekFirst()
+		m.Tb = m.Tb.RemoveFirst()
 		return true
-	})
+	}
+	return false
+}
+
+func (m *Merger) shiftA(newB Operation) bool {
+	if m.Ta.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Tb.AddFirst(newB))
+		return false
+	}
+	m.Fb = newB
+	m.Fa = m.Ta.PeekFirst()
+	m.Ta = m.Ta.RemoveFirst()
+	return true
+}
+
+func (m *Merger) addDelete(text string) {
+	if len(m.Ops) > 0 {
+		if del, ok := m.Ops[len(m.Ops)-1].(*DeleteOp); ok {
+			m.Ops[len(m.Ops)-1] = &DeleteOp{del.Text + text}
+			return
+		}
+	}
+	m.appendOps(&DeleteOp{text})
+}
+
+func (m *Merger) appendOps(ops ...Operation) {
+	m.Ops = append(m.Ops, ops...)
+}
+
+// Merge operations from the same ancestor document into this one
+func (m *Merger) merge(a, b *Document) {
+	if !m.shiftBoth() {
+		return
+	}
+	for cont := true; cont; {
+		if _, ok := m.Fa.(*RetainOp); ok {
+			m.swap()
+		}
+		cont = m.Fa.Merge(m)
+	}
 }
 
 func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
@@ -538,35 +588,68 @@ func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
 // append edits that restore the original document
 func (d *Document) ReverseEdits() []Replacement {
 	edits := make([]Replacement, 0, 8)
-	docLen := d.Ops.Measure().NewLen
+	var repl Replacement
+	offset := d.Ops.Measure().NewLen
 	d.Ops.EachReverse(func(op Operation) bool {
-		width := op.Measure().NewLen
 		switch op := op.(type) {
 		case *DeleteOp:
-			edits = append(edits, Replacement{Offset: docLen, Length: 0, Text: op.Text})
+			repl.Text = op.Text + repl.Text
 		case *InsertOp:
-			edits = append(edits, Replacement{Offset: docLen - width, Length: len(op.Text), Text: ""})
+			repl.Length += len(op.Text)
+			offset -= len(op.Text)
+		case *RetainOp:
+			if repl.Length > 0 || len(repl.Text) > 0 {
+				repl.Offset = offset
+				edits = append(edits, repl)
+				repl.Length = 0
+				repl.Text = ""
+			}
+			offset -= len(op.Text)
 		}
-		docLen -= width
 		return true
 	})
+	if repl.Length > 0 || len(repl.Text) > 0 {
+		repl.Offset = offset
+		edits = append(edits, repl)
+	}
 	return edits
 }
 
 // append Edits that restore the original document
 func (d *Document) Edits() []Replacement {
 	edits := make([]Replacement, 0, 8)
+	hasRepl := false
+	var repl Replacement
 	offset := 0
+	ensureRepl := func() {
+		if !hasRepl {
+			hasRepl = true
+			repl.Offset = offset
+			repl.Length = 0
+			repl.Text = ""
+		}
+	}
 	d.Ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
-			edits = append(edits, Replacement{Offset: offset, Length: len(op.Text), Text: ""})
+			ensureRepl()
+			repl.Length += len(op.Text)
 		case *InsertOp:
-			edits = append(edits, Replacement{Offset: offset, Length: 0, Text: op.Text})
+			ensureRepl()
+			repl.Text += op.Text
+			offset += len(op.Text)
+		case *RetainOp:
+			if hasRepl {
+				edits = append(edits, repl)
+				hasRepl = false
+			}
+			offset += len(op.Text)
 		}
-		offset += op.Measure().NewLen
 		return true
 	})
+	if hasRepl {
+		edits = append(edits, repl)
+	}
 	return edits
 }
 

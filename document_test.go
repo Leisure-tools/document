@@ -95,9 +95,8 @@ func TestMerge(t *testing.T) {
 	testEqual(t, a.String(), docMerged, "unsuccessful merge")
 	a, b = docs(t)
 	b.Merge(a)
-	bDoc := b.String()
-	testEqual(t, bDoc, docMerged, "unsuccessful merge")
-	revDoc := NewDocument(bDoc)
+	testEqual(t, b.String(), docMerged, "unsuccessful merge")
+	revDoc := b.Freeze()
 	for _, r := range b.ReverseEdits() {
 		replace(t, revDoc, "peer1", r.Offset, r.Length, r.Text)
 	}
