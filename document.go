@@ -161,7 +161,7 @@ func (r *RetainOp) Measure() Measure {
 
 func (r *RetainOp) Merge(m *Merger) bool {
 	// only called when both are retains
-	opB, _ := m.FirstOpB.(*RetainOp)
+	opB, _ := m.OpB.(*RetainOp)
 	if len(r.Text) > len(opB.Text) {
 		m.swap()
 		r, opB = opB, r
@@ -174,57 +174,54 @@ func (r *RetainOp) Merge(m *Merger) bool {
 	return m.shiftBoth()
 }
 
-func (d *SkipOp) String() string {
+func (s *SkipOp) String() string {
 	return ""
 }
 
-func (d *SkipOp) OpString(offset int, verbose ...bool) string {
+func (s *SkipOp) OpString(offset int, verbose ...bool) string {
 	verboseStr := ""
 	if len(verbose) > 0 {
-		verboseStr = ", " + d.Text
+		verboseStr = ", " + s.Text
 	}
-	return fmt.Sprintf("skip[%d%s](%d, %d)", len(d.Text), verboseStr, offset, len(d.Text))
+	return fmt.Sprintf("skip[%d%s](%d, %d)", len(s.Text), verboseStr, offset, len(s.Text))
 }
 
-func (d *SkipOp) GetText() string {
-	if d == nil {
+func (s *SkipOp) GetText() string {
+	if s == nil {
 		return ""
 	}
-	return d.Text
+	return s.Text
 }
 
-func (d *SkipOp) Measure() Measure {
-	return Measure{OldLen: len(d.Text)}
+func (s *SkipOp) Measure() Measure {
+	return Measure{OldLen: len(s.Text)}
 }
 
-func (d *SkipOp) Merge(m *Merger) bool {
-	switch opB := m.FirstOpB.(type) {
+func (s *SkipOp) Merge(m *Merger) bool {
+	switch opB := m.OpB.(type) {
 	case *RetainOp:
-		if len(d.Text) > len(opB.Text) {
-			m.addSkip(d.Text[0:len(opB.Text)])
+		if len(s.Text) > len(opB.Text) {
+			m.addSkip(s.Text[0:len(opB.Text)])
 			m.swap()
-			return m.shiftA(&SkipOp{d.Text[len(opB.Text):]})
+			return m.shiftA(&SkipOp{s.Text[len(opB.Text):]})
 		}
-		m.addSkip(d.Text)
-		if len(d.Text) < len(opB.Text) {
-			return m.shiftA(&RetainOp{opB.Text[len(d.Text):]})
+		m.addSkip(s.Text)
+		if len(s.Text) < len(opB.Text) {
+			return m.shiftA(&RetainOp{opB.Text[len(s.Text):]})
 		}
 		return m.shiftBoth()
 	case *SkipOp:
-		if len(d.Text) > len(opB.Text) {
+		if len(s.Text) > len(opB.Text) {
 			m.swap()
-			d, opB = opB, d
+			s, opB = opB, s
 		}
-		m.addSkip(d.Text)
-		if len(d.Text) < len(opB.Text) {
-			return m.shiftA(&SkipOp{opB.Text[len(d.Text):]})
+		m.addSkip(s.Text)
+		if len(s.Text) < len(opB.Text) {
+			return m.shiftA(&SkipOp{opB.Text[len(s.Text):]})
 		}
 		return m.shiftBoth()
-	case *InsertOp:
-		m.addSkip(d.Text)
-		return m.shiftBoth(opB)
-	default:
-		m.addSkip(d.Text)
+	default: // *MarkerOp, *InsertOp
+		m.addSkip(s.Text)
 		return m.shiftA(opB)
 	}
 }
@@ -249,7 +246,7 @@ func (i *InsertOp) Measure() Measure {
 }
 
 func (i *InsertOp) Merge(m *Merger) bool {
-	switch opB := m.FirstOpB.(type) {
+	switch opB := m.OpB.(type) {
 	case *RetainOp:
 		m.appendOps(i)
 		return m.shiftA(opB)
@@ -289,7 +286,7 @@ func (s *MarkerOp) Measure() Measure {
 }
 
 func (opA *MarkerOp) Merge(m *Merger) bool {
-	switch opB := m.FirstOpB.(type) {
+	switch opB := m.OpB.(type) {
 	case *RetainOp:
 		m.appendOps(opA)
 		return m.shiftA(opB)
@@ -300,6 +297,88 @@ func (opA *MarkerOp) Merge(m *Merger) bool {
 		return m.shiftBoth(&MarkerOp{opA.Names.Union(opB.Names)})
 	default:
 		return m.shiftBoth(opA, opB)
+	}
+}
+
+///
+/// merger
+///
+
+type Merger struct {
+	Doc          *Document
+	Merged       []Operation
+	PendingOps   []Operation
+	PendingSkip  *strings.Builder
+	OpA, OpB     Operation
+	TreeA, TreeB ft.FingerTree[OpMeasurer, Operation, Measure]
+}
+
+func (m *Merger) swap() {
+	m.OpA, m.TreeA, m.OpB, m.TreeB = m.OpB, m.TreeB, m.OpA, m.TreeA
+}
+
+func (m *Merger) shiftBoth(newOps ...Operation) bool {
+	m.appendOps(newOps...)
+	if !m.TreeA.IsEmpty() && !m.TreeB.IsEmpty() {
+		m.OpA = m.TreeA.PeekFirst()
+		m.TreeA = m.TreeA.RemoveFirst()
+		m.OpB = m.TreeB.PeekFirst()
+		m.TreeB = m.TreeB.RemoveFirst()
+		return true
+	}
+	m.commitPending()
+	// one of the trees is empty, so just concat them both
+	m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeA.Concat(m.TreeB))
+	return false
+}
+
+func (m *Merger) shiftA(newB Operation) bool {
+	if !m.TreeA.IsEmpty() {
+		m.OpB = newB
+		m.OpA = m.TreeA.PeekFirst()
+		m.TreeA = m.TreeA.RemoveFirst()
+		return true
+	}
+	m.commitPending()
+	m.Doc.Ops = newOpTree(m.Merged...).AddLast(newB).Concat(m.TreeA.Concat(m.TreeB))
+	return false
+}
+
+func (m *Merger) addSkip(text string) {
+	if len(m.Merged) > 0 {
+		if skip, ok := m.Merged[len(m.Merged)-1].(*SkipOp); ok {
+			m.Merged[len(m.Merged)-1] = &SkipOp{skip.Text + text}
+			return
+		}
+	}
+	m.appendOps(&SkipOp{text})
+}
+
+func (m *Merger) appendOps(ops ...Operation) {
+	m.PendingOps = append(m.PendingOps, ops...)
+}
+
+func (m *Merger) commitPending() {
+	if m.PendingSkip.Len() > 0 {
+		m.Merged = append(m.Merged, &SkipOp{m.PendingSkip.String()})
+		m.PendingSkip.Reset()
+	}
+	if len(m.PendingOps) > 0 {
+		m.Merged = append(m.Merged, m.PendingOps...)
+		m.PendingOps = m.PendingOps[:0]
+	}
+}
+
+// Merge operations from the same ancestor document into this one
+func (m *Merger) merge(a, b *Document) {
+	if !m.shiftBoth() {
+		return
+	}
+	for cont := true; cont; {
+		if Isa[*RetainOp](m.OpA) {
+			m.swap()
+		}
+		cont = m.OpA.Merge(m)
 	}
 }
 
@@ -559,15 +638,13 @@ func (d *Document) Replace(peer string, start int, length int, str string) {
 	d.Ops = left.Concat(right)
 }
 
-type Merger struct {
-	Doc                *Document
-	Merged             []Operation
-	PendingOps         []Operation
-	PendingSkip        *strings.Builder
-	FirstOpA, FirstOpB Operation
-	TreeA, TreeB       ft.FingerTree[OpMeasurer, Operation, Measure]
+func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
+	return tree.Split(func(m Measure) bool {
+		return m.Markers.Has(name)
+	})
 }
 
+// Merge another version of the original document into this one
 func (d *Document) Merge(b *Document) {
 	(&Merger{
 		Doc:         d,
@@ -577,83 +654,6 @@ func (d *Document) Merge(b *Document) {
 		TreeA:       d.Ops,
 		TreeB:       b.Ops,
 	}).merge(d, b)
-}
-
-func (m *Merger) swap() {
-	m.FirstOpA, m.TreeA, m.FirstOpB, m.TreeB = m.FirstOpB, m.TreeB, m.FirstOpA, m.TreeA
-}
-
-func (m *Merger) shiftBoth(newOps ...Operation) bool {
-	m.appendOps(newOps...)
-	if m.TreeA.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeB)
-	} else if m.TreeB.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeA)
-	} else {
-		m.FirstOpA = m.TreeA.PeekFirst()
-		m.TreeA = m.TreeA.RemoveFirst()
-		m.FirstOpB = m.TreeB.PeekFirst()
-		m.TreeB = m.TreeB.RemoveFirst()
-		return true
-	}
-	return false
-}
-
-func (m *Merger) shiftA(newB Operation) bool {
-	if m.TreeA.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeB.AddFirst(newB))
-		return false
-	}
-	m.FirstOpB = newB
-	m.FirstOpA = m.TreeA.PeekFirst()
-	m.TreeA = m.TreeA.RemoveFirst()
-	return true
-}
-
-func (m *Merger) addSkip(text string) {
-	if len(m.Merged) > 0 {
-		if skip, ok := m.Merged[len(m.Merged)-1].(*SkipOp); ok {
-			m.Merged[len(m.Merged)-1] = &SkipOp{skip.Text + text}
-			return
-		}
-	}
-	m.appendOps(&SkipOp{text})
-}
-
-func (m *Merger) appendOps(ops ...Operation) {
-	m.PendingOps = append(m.PendingOps, ops...)
-}
-
-func (m *Merger) commitPending() {
-	if m.PendingSkip.Len() > 0 {
-		m.Merged = append(m.Merged, &SkipOp{m.PendingSkip.String()})
-		m.PendingSkip.Reset()
-	}
-	if len(m.PendingOps) > 0 {
-		m.Merged = append(m.Merged, m.PendingOps...)
-		m.PendingOps = m.PendingOps[:0]
-	}
-}
-
-// Merge operations from the same ancestor document into this one
-func (m *Merger) merge(a, b *Document) {
-	if !m.shiftBoth() {
-		return
-	}
-	for cont := true; cont; {
-		if _, ok := m.FirstOpA.(*RetainOp); ok {
-			m.swap()
-		}
-		cont = m.FirstOpA.Merge(m)
-	}
-	m.commitPending()
-	a.Ops = newOpTree(m.Merged...)
-}
-
-func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
-	return tree.Split(func(m Measure) bool {
-		return m.Markers.Has(name)
-	})
 }
 
 func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
