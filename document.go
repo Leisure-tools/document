@@ -28,7 +28,7 @@ type Replacement struct {
 type OpMeasurer bool
 
 type Operation interface {
-	OpString(offset int) string
+	OpString(offset int, verbose ...bool) string
 	GetText() string
 	Measure() Measure
 	Merge(m *Merger) bool
@@ -45,7 +45,7 @@ type RetainOp struct {
 	Text string
 }
 
-type DeleteOp struct {
+type SkipOp struct {
 	Text string
 	// could put a pointer to a "move" operation here if text has moved
 }
@@ -56,7 +56,7 @@ type InsertOp struct {
 }
 
 type MarkerOp struct {
-	Name string
+	Names Set[string]
 }
 
 ///
@@ -71,37 +71,49 @@ func NewSet[T comparable](elements ...T) Set[T] {
 	return result
 }
 
-func (m Set[T]) Copy() Set[T] {
+func (s Set[T]) ToSlice() []T {
+	items := make([]T, 0, len(s))
+	for item := range s {
+		items = append(items, item)
+	}
+	return items
+}
+
+func (s Set[T]) Copy() Set[T] {
 	result := Set[T]{}
-	for k, v := range m {
+	for k, v := range s {
 		result[k] = v
 	}
 	return result
 }
 
-func (m Set[T]) Merge(m2 Set[T]) Set[T] {
-	for k, v := range m2 {
-		m[k] = v
+func (s Set[T]) Merge(s2 Set[T]) Set[T] {
+	for k, v := range s2 {
+		s[k] = v
 	}
-	return m
+	return s
 }
 
-func (m Set[T]) Union(m2 Set[T]) Set[T] {
-	if len(m) == 0 {
-		return m
-	} else if len(m2) == 0 {
-		return m2
+func (s Set[T]) Union(s2 Set[T]) Set[T] {
+	if len(s) == 0 {
+		return s
+	} else if len(s2) == 0 {
+		return s2
 	}
-	return m.Copy().Merge(m2)
+	return s.Copy().Merge(s2)
 }
 
-func (m Set[T]) Add(op T) Set[T] {
-	m[op] = true
-	return m
+func (s Set[T]) Add(op T) Set[T] {
+	s[op] = true
+	return s
 }
 
-func (m Set[T]) Has(op T) bool {
-	return m[op]
+func (s Set[T]) Has(op T) bool {
+	return s[op]
+}
+
+func (s Set[T]) IsEmpty() bool {
+	return len(s) == 0
 }
 
 ///
@@ -132,11 +144,14 @@ func (r *RetainOp) String() string {
 	return r.Text
 }
 
-func (r *RetainOp) OpString(offset int) string {
+func (r *RetainOp) OpString(offset int, verbose ...bool) string {
 	return fmt.Sprintf("retain[%d](%d, '%s')", len(r.Text), offset, r.Text)
 }
 
 func (r *RetainOp) GetText() string {
+	if r == nil {
+		return ""
+	}
 	return r.Text
 }
 
@@ -146,62 +161,70 @@ func (r *RetainOp) Measure() Measure {
 
 func (r *RetainOp) Merge(m *Merger) bool {
 	// only called when both are retains
-	opB, _ := m.Fb.(*RetainOp)
+	opB, _ := m.FirstOpB.(*RetainOp)
 	if len(r.Text) > len(opB.Text) {
 		m.swap()
 		r, opB = opB, r
 	}
 	m.appendOps(r)
+	m.commitPending()
 	if len(r.Text) < len(opB.Text) {
 		return m.shiftA(&RetainOp{opB.Text[len(r.Text):]})
 	}
 	return m.shiftBoth()
 }
 
-func (d *DeleteOp) String() string {
+func (d *SkipOp) String() string {
 	return ""
 }
 
-func (d *DeleteOp) OpString(offset int) string {
-	return fmt.Sprintf("delete[%d](%d, %d)", len(d.Text), offset, len(d.Text))
+func (d *SkipOp) OpString(offset int, verbose ...bool) string {
+	verboseStr := ""
+	if len(verbose) > 0 {
+		verboseStr = ", " + d.Text
+	}
+	return fmt.Sprintf("skip[%d%s](%d, %d)", len(d.Text), verboseStr, offset, len(d.Text))
 }
 
-func (d *DeleteOp) GetText() string {
+func (d *SkipOp) GetText() string {
+	if d == nil {
+		return ""
+	}
 	return d.Text
 }
 
-func (d *DeleteOp) Measure() Measure {
+func (d *SkipOp) Measure() Measure {
 	return Measure{OldLen: len(d.Text)}
 }
 
-func (d *DeleteOp) Merge(m *Merger) bool {
-	switch opB := m.Fb.(type) {
+func (d *SkipOp) Merge(m *Merger) bool {
+	switch opB := m.FirstOpB.(type) {
 	case *RetainOp:
 		if len(d.Text) > len(opB.Text) {
-			m.addDelete(d.Text[0:len(opB.Text)])
+			m.addSkip(d.Text[0:len(opB.Text)])
 			m.swap()
-			return m.shiftA(&DeleteOp{d.Text[len(opB.Text):]})
-		} else {
-			m.addDelete(d.Text)
-			if len(d.Text) < len(opB.Text) {
-				return m.shiftA(&RetainOp{opB.Text[len(d.Text):]})
-			} else {
-				return m.shiftBoth()
-			}
+			return m.shiftA(&SkipOp{d.Text[len(opB.Text):]})
 		}
-	case *DeleteOp:
+		m.addSkip(d.Text)
+		if len(d.Text) < len(opB.Text) {
+			return m.shiftA(&RetainOp{opB.Text[len(d.Text):]})
+		}
+		return m.shiftBoth()
+	case *SkipOp:
 		if len(d.Text) > len(opB.Text) {
 			m.swap()
 			d, opB = opB, d
 		}
-		m.addDelete(d.Text)
+		m.addSkip(d.Text)
 		if len(d.Text) < len(opB.Text) {
-			return m.shiftA(&DeleteOp{opB.Text[len(d.Text):]})
-		} else {
-			return m.shiftBoth()
+			return m.shiftA(&SkipOp{opB.Text[len(d.Text):]})
 		}
+		return m.shiftBoth()
+	case *InsertOp:
+		m.addSkip(d.Text)
+		return m.shiftBoth(opB)
 	default:
-		m.addDelete(d.Text)
+		m.addSkip(d.Text)
 		return m.shiftA(opB)
 	}
 }
@@ -210,11 +233,14 @@ func (i *InsertOp) String() string {
 	return i.Text
 }
 
-func (i *InsertOp) OpString(offset int) string {
+func (i *InsertOp) OpString(offset int, verbose ...bool) string {
 	return fmt.Sprintf("insert[%s, %d](%d, '%s')", i.Peer, len(i.Text), offset, i.Text)
 }
 
 func (i *InsertOp) GetText() string {
+	if i == nil {
+		return ""
+	}
 	return i.Text
 }
 
@@ -223,12 +249,12 @@ func (i *InsertOp) Measure() Measure {
 }
 
 func (i *InsertOp) Merge(m *Merger) bool {
-	switch opB := m.Fb.(type) {
+	switch opB := m.FirstOpB.(type) {
 	case *RetainOp:
 		m.appendOps(i)
 		return m.shiftA(opB)
-	case *DeleteOp:
-		m.swap() // handle in the delete case above
+	case *SkipOp:
+		m.swap() // handle in the skip case above
 		return true
 	case *InsertOp:
 		if i.Peer > opB.Peer {
@@ -242,12 +268,16 @@ func (i *InsertOp) Merge(m *Merger) bool {
 	}
 }
 
+func NewMarkerOp(names ...string) *MarkerOp {
+	return &MarkerOp{NewSet(names...)}
+}
+
 func (s *MarkerOp) String() string {
 	return ""
 }
 
-func (s *MarkerOp) OpString(offset int) string {
-	return fmt.Sprintf("marker(%s, %d)", s.Name, offset)
+func (s *MarkerOp) OpString(offset int, verbose ...bool) string {
+	return fmt.Sprintf("marker(%s, %d)", strings.Join(s.Names.ToSlice(), ", "), offset)
 }
 
 func (s *MarkerOp) GetText() string {
@@ -255,17 +285,19 @@ func (s *MarkerOp) GetText() string {
 }
 
 func (s *MarkerOp) Measure() Measure {
-	return Measure{Markers: NewSet(s.Name)}
+	return Measure{Markers: s.Names}
 }
 
 func (opA *MarkerOp) Merge(m *Merger) bool {
-	switch opB := m.Fb.(type) {
+	switch opB := m.FirstOpB.(type) {
 	case *RetainOp:
 		m.appendOps(opA)
 		return m.shiftA(opB)
-	case *DeleteOp, *InsertOp:
+	case *SkipOp, *InsertOp:
 		m.swap() // handle in the case above
 		return true
+	case *MarkerOp:
+		return m.shiftBoth(&MarkerOp{opA.Names.Union(opB.Names)})
 	default:
 		return m.shiftBoth(opA, opB)
 	}
@@ -318,14 +350,14 @@ func (d *Document) OriginalString() string {
 	sb := &strings.Builder{}
 	for _, item := range d.Ops.ToSlice() {
 		switch op := item.(type) {
-		case *DeleteOp, *RetainOp:
+		case *SkipOp, *RetainOp:
 			fmt.Fprint(sb, op.GetText())
 		}
 	}
 	return sb.String()
 }
 
-func OpString(tree OpTree) string {
+func OpString(tree OpTree, verbose ...bool) string {
 	sb := &strings.Builder{}
 	pos := 0
 	first := true
@@ -335,14 +367,37 @@ func OpString(tree OpTree) string {
 		} else {
 			fmt.Fprint(sb, ", ")
 		}
-		fmt.Fprint(sb, item.OpString(pos))
+		fmt.Fprint(sb, item.OpString(pos, verbose...))
 		pos += item.Measure().NewLen
 	}
 	return sb.String()
 }
 
-func (d *Document) OpString() string {
-	return OpString(d.Ops)
+func (d *Document) OpString(verbose ...bool) string {
+	return OpString(d.Ops, verbose...)
+}
+
+func (d *Document) Changes(prefix string) string {
+	sb := &strings.Builder{}
+	for _, op := range d.Ops.ToSlice() {
+		switch op := op.(type) {
+		case *MarkerOp:
+			fmt.Fprintf(sb, "%s> %s\n", prefix, strings.Join(op.Names.ToSlice(), ", "))
+		case *RetainOp:
+			printOp(sb, prefix, "=", op.Text)
+		case *SkipOp:
+			printOp(sb, prefix, "-", op.Text)
+		case *InsertOp:
+			printOp(sb, prefix, "+", op.Text)
+		}
+	}
+	return sb.String()
+}
+
+func printOp(sb *strings.Builder, lead, prefix, text string) {
+	for _, line := range strings.Split(text, "\n") {
+		fmt.Fprintf(sb, "%s%s%s%s\n", lead, prefix, line, prefix)
+	}
 }
 
 func As[T any](v any) T {
@@ -363,12 +418,12 @@ func SplitOld(tree OpTree, offset int) (OpTree, OpTree) {
 	splitPoint := offset - left.Measure().OldLen
 	if splitPoint > 0 {
 		// not a clean break, if the first right element is a retain, it needs to be split
-		// otherwise it is a delete and should remain on the right
+		// otherwise it is a skip and should remain on the right
 		switch first := right.PeekFirst().(type) {
 		case *RetainOp:
 			left = left.AddLast(&RetainOp{first.Text[:splitPoint]})
 			right = right.RemoveFirst().AddFirst(&RetainOp{first.Text[splitPoint:]})
-		case *DeleteOp:
+		case *SkipOp:
 			// leave it on the right
 		default:
 			panic(fmt.Errorf("bad value at split point %d: %v", splitPoint, first))
@@ -379,7 +434,7 @@ func SplitOld(tree OpTree, offset int) (OpTree, OpTree) {
 
 // SplitNew the tree's new text at an offset
 func SplitNew(tree OpTree, offset int) (OpTree, OpTree) {
-	if offset > tree.Measure().NewLen+1 {
+	if offset > tree.Measure().NewLen {
 		panic(fmt.Errorf("Split point %d is not within doc of length %d", offset, tree.Measure().NewLen))
 	}
 	left, right := tree.Split(func(m Measure) bool {
@@ -409,44 +464,55 @@ func Isa[T any](v any) bool {
 	return ok
 }
 
-// if left ends in inserts and (optionally) markers, shift them to right
-func ShiftInsertsRight(left OpTree, right OpTree) (OpTree, OpTree) {
-	l, r := left, right
-	found := false
-	for !l.IsEmpty() {
-		switch op := l.PeekLast().(type) {
-		case *MarkerOp, *InsertOp:
-			l = l.RemoveLast()
-			r = r.AddFirst(op)
-			found = found || Isa[*InsertOp](op)
-			continue
+// delete from the new text -- save retained text in skipText and discard inserts
+func deleteText(right OpTree, length int, skipText *strings.Builder) OpTree {
+	left := newOpTree()
+	for length > 0 {
+		if right.IsEmpty() {
+			panic("Delete past end of document")
 		}
-		break
+		first := right.PeekFirst()
+		right = right.RemoveFirst()
+		switch op := first.(type) {
+		case *RetainOp:
+			if length >= len(op.GetText()) {
+				skipText.WriteString(op.GetText())
+				length -= len(op.GetText())
+				continue
+			}
+			skipText.WriteString(op.GetText()[:length])
+			first = &RetainOp{op.GetText()[length:]}
+			length = 0
+		case *InsertOp:
+			if length >= len(op.GetText()) {
+				length -= len(op.GetText())
+				continue
+			}
+			first = &InsertOp{op.Peer, op.Text[length:]}
+			length = 0
+		}
+		left = left.AddLast(first)
 	}
-	if found {
-		return l, r
-	}
-	return left, right
+	return left.Concat(right)
 }
 
-// if left ends in deletes and (optionally) markers, shift them to right
-func ShiftDeletesRight(left OpTree, right OpTree) (OpTree, OpTree) {
-	l, r := left, right
-	found := false
-	for !l.IsEmpty() {
-		switch op := l.PeekLast().(type) {
-		case *MarkerOp, *DeleteOp:
-			l = l.RemoveLast()
-			r = r.AddFirst(op)
-			found = found || Isa[*DeleteOp](op)
-			continue
+// find the first skip to the left if there is one before the first retain
+func getLeftSkip(t OpTree) (OpTree, *SkipOp, OpTree) {
+	empty := newOpTree()
+	left := t
+	right := empty
+	for !left.IsEmpty() {
+		last := left.PeekLast()
+		left = left.RemoveLast()
+		switch op := last.(type) {
+		case *RetainOp:
+			break
+		case *SkipOp:
+			return left, op, right
 		}
-		break
+		right = right.AddFirst(last)
 	}
-	if found {
-		return l, r
-	}
-	return left, right
+	return t, nil, empty
 }
 
 func RemoveMarker(tree OpTree, name string) OpTree {
@@ -458,108 +524,115 @@ func RemoveMarker(tree OpTree, name string) OpTree {
 }
 
 func (d *Document) Replace(peer string, start int, length int, str string) {
-	// the left mid value should be a string if mid is nonempty
+	// if right is nonempty, it should start with an insert or a retain
 	left, right := SplitNew(d.Ops, start)
-	if length > 0 {
-		sb := &strings.Builder{}
-		// gather deletes at the end of left, followed by markers
-		mid := newOpTree()
-		left, mid = ShiftDeletesRight(left, mid)
-		if !mid.IsEmpty() {
-			// there will only be one delete
-			del, _ := mid.PeekFirst().(*DeleteOp)
-			fmt.Fprint(sb, del.Text)
-			mid = mid.RemoveFirst()
+	for length > 0 {
+		if right.IsEmpty() {
+			panic("Delete past end of document")
 		}
-		var del OpTree
-		del, right = SplitNew(right, length)
-		del.Each(func(v Operation) bool {
-			switch o := v.(type) {
-			case *RetainOp, *DeleteOp:
-				// coalesce retains and deletes into a single delete
-				fmt.Fprint(sb, o.GetText())
-			case *InsertOp:
-				// chuck inserts
-			default:
-				// gather markers after the delete
-				mid.AddLast(o)
+		first := right.PeekFirst()
+		right = right.RemoveFirst()
+		switch op := first.(type) {
+		case *SkipOp, *MarkerOp:
+			left = left.AddLast(first)
+		default:
+			if ins, ok := op.(*InsertOp); ok {
+				if length < len(op.GetText()) {
+					right = right.AddFirst(&InsertOp{ins.Peer, op.GetText()[length:]})
+				}
+			} else {
+				if length < len(op.GetText()) {
+					right = right.AddFirst(&RetainOp{op.GetText()[length:]})
+				}
+				if length > len(op.GetText()) {
+					left = left.AddLast(&SkipOp{op.GetText()})
+				} else {
+					left = left.AddLast(&SkipOp{op.GetText()[:length]})
+				}
 			}
-			return true
-		})
-		if !right.IsEmpty() {
-			switch del := right.PeekFirst().(type) {
-			case *DeleteOp:
-				fmt.Fprint(sb, del.Text)
-				right = right.RemoveFirst()
-			}
+			length -= len(op.GetText())
 		}
-		left = left.AddLast(&DeleteOp{sb.String()}).Concat(mid)
 	}
-	if len(str) > 0 {
-		right = right.AddFirst(&InsertOp{peer, str})
+	if str != "" {
+		left = left.AddLast(&InsertOp{peer, str})
 	}
 	d.Ops = left.Concat(right)
 }
 
 type Merger struct {
-	Doc    *Document
-	Ops    []Operation
-	Fa, Fb Operation
-	Ta, Tb ft.FingerTree[OpMeasurer, Operation, Measure]
+	Doc                *Document
+	Merged             []Operation
+	PendingOps         []Operation
+	PendingSkip        *strings.Builder
+	FirstOpA, FirstOpB Operation
+	TreeA, TreeB       ft.FingerTree[OpMeasurer, Operation, Measure]
 }
 
 func (d *Document) Merge(b *Document) {
 	(&Merger{
-		Doc: d,
-		Ops: make([]Operation, 0, 8),
-		Ta:  d.Ops,
-		Tb:  b.Ops,
+		Doc:         d,
+		Merged:      make([]Operation, 0, 8),
+		PendingOps:  make([]Operation, 0, 8),
+		PendingSkip: &strings.Builder{},
+		TreeA:       d.Ops,
+		TreeB:       b.Ops,
 	}).merge(d, b)
 }
 
 func (m *Merger) swap() {
-	m.Fa, m.Ta, m.Fb, m.Tb = m.Fb, m.Tb, m.Fa, m.Ta
+	m.FirstOpA, m.TreeA, m.FirstOpB, m.TreeB = m.FirstOpB, m.TreeB, m.FirstOpA, m.TreeA
 }
 
 func (m *Merger) shiftBoth(newOps ...Operation) bool {
 	m.appendOps(newOps...)
-	if m.Ta.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Tb)
-	} else if m.Tb.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Ta)
+	if m.TreeA.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeB)
+	} else if m.TreeB.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeA)
 	} else {
-		m.Fa = m.Ta.PeekFirst()
-		m.Ta = m.Ta.RemoveFirst()
-		m.Fb = m.Tb.PeekFirst()
-		m.Tb = m.Tb.RemoveFirst()
+		m.FirstOpA = m.TreeA.PeekFirst()
+		m.TreeA = m.TreeA.RemoveFirst()
+		m.FirstOpB = m.TreeB.PeekFirst()
+		m.TreeB = m.TreeB.RemoveFirst()
 		return true
 	}
 	return false
 }
 
 func (m *Merger) shiftA(newB Operation) bool {
-	if m.Ta.IsEmpty() {
-		m.Doc.Ops = newOpTree(m.Ops...).Concat(m.Tb.AddFirst(newB))
+	if m.TreeA.IsEmpty() {
+		m.Doc.Ops = newOpTree(m.Merged...).Concat(m.TreeB.AddFirst(newB))
 		return false
 	}
-	m.Fb = newB
-	m.Fa = m.Ta.PeekFirst()
-	m.Ta = m.Ta.RemoveFirst()
+	m.FirstOpB = newB
+	m.FirstOpA = m.TreeA.PeekFirst()
+	m.TreeA = m.TreeA.RemoveFirst()
 	return true
 }
 
-func (m *Merger) addDelete(text string) {
-	if len(m.Ops) > 0 {
-		if del, ok := m.Ops[len(m.Ops)-1].(*DeleteOp); ok {
-			m.Ops[len(m.Ops)-1] = &DeleteOp{del.Text + text}
+func (m *Merger) addSkip(text string) {
+	if len(m.Merged) > 0 {
+		if skip, ok := m.Merged[len(m.Merged)-1].(*SkipOp); ok {
+			m.Merged[len(m.Merged)-1] = &SkipOp{skip.Text + text}
 			return
 		}
 	}
-	m.appendOps(&DeleteOp{text})
+	m.appendOps(&SkipOp{text})
 }
 
 func (m *Merger) appendOps(ops ...Operation) {
-	m.Ops = append(m.Ops, ops...)
+	m.PendingOps = append(m.PendingOps, ops...)
+}
+
+func (m *Merger) commitPending() {
+	if m.PendingSkip.Len() > 0 {
+		m.Merged = append(m.Merged, &SkipOp{m.PendingSkip.String()})
+		m.PendingSkip.Reset()
+	}
+	if len(m.PendingOps) > 0 {
+		m.Merged = append(m.Merged, m.PendingOps...)
+		m.PendingOps = m.PendingOps[:0]
+	}
 }
 
 // Merge operations from the same ancestor document into this one
@@ -568,11 +641,13 @@ func (m *Merger) merge(a, b *Document) {
 		return
 	}
 	for cont := true; cont; {
-		if _, ok := m.Fa.(*RetainOp); ok {
+		if _, ok := m.FirstOpA.(*RetainOp); ok {
 			m.swap()
 		}
-		cont = m.Fa.Merge(m)
+		cont = m.FirstOpA.Merge(m)
 	}
+	m.commitPending()
+	a.Ops = newOpTree(m.Merged...)
 }
 
 func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
@@ -592,7 +667,7 @@ func (d *Document) ReverseEdits() []Replacement {
 	offset := d.Ops.Measure().NewLen
 	d.Ops.EachReverse(func(op Operation) bool {
 		switch op := op.(type) {
-		case *DeleteOp:
+		case *SkipOp:
 			repl.Text = op.Text + repl.Text
 		case *InsertOp:
 			repl.Length += len(op.Text)
@@ -631,7 +706,7 @@ func (d *Document) Edits() []Replacement {
 	}
 	d.Ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
-		case *DeleteOp:
+		case *SkipOp:
 			ensureRepl()
 			repl.Length += len(op.Text)
 		case *InsertOp:
@@ -651,6 +726,58 @@ func (d *Document) Edits() []Replacement {
 		edits = append(edits, repl)
 	}
 	return edits
+}
+
+func (d *Document) Simplify() {
+	ops := d.Ops.ToSlice()
+	if len(ops) < 2 {
+		return
+	}
+	processed := ops[:1] // start with the first item
+	next := ops[1:]
+	eat := false
+	for len(processed) > 1 || len(next) > 0 {
+		if eat && len(next) == 0 {
+			break
+		} else if eat || len(processed) == 1 {
+			processed = append(processed, next[0])
+			next = next[1:]
+			eat = false
+		}
+		cur := processed[len(processed)-1]
+		prev := processed[len(processed)-2]
+		switch op := cur.(type) {
+		case *RetainOp:
+			if prevRet, ok := prev.(*RetainOp); ok {
+				// absorb the retain into the previous one
+				processed = processed[:len(processed)-1]
+				processed[len(processed)-1] = &RetainOp{prevRet.Text + op.Text}
+				continue
+			}
+		case *InsertOp:
+			if prevSkip, ok := prev.(*SkipOp); ok {
+				smaller := len(op.Text)
+				if len(prevSkip.Text) < smaller {
+					smaller = len(prevSkip.Text)
+				}
+				text := op.Text[0:smaller]
+				if strings.HasPrefix(prevSkip.Text, text) {
+					// replace the skip with a retain
+					processed[len(processed)-2] = &RetainOp{text}
+					if len(prevSkip.Text) > smaller {
+						processed[len(processed)-1] = &SkipOp{prevSkip.Text[smaller:]}
+					} else if len(op.Text) > smaller {
+						processed[len(processed)-1] = &InsertOp{op.Peer, op.Text[smaller:]}
+					} else {
+						processed = processed[:len(processed)-1]
+					}
+					continue
+				}
+			}
+		}
+		eat = true
+	}
+	d.Ops = newOpTree(processed...)
 }
 
 func (d *Document) Apply(peer string, edits []Replacement) {

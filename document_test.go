@@ -13,8 +13,7 @@ func replace(t *testing.T, tree *Document, peer string, start int, length int, t
 	tree.Replace(peer, start, length, text)
 	expect := fmt.Sprintf("%s%s%s", str[0:start], text, str[start+length:])
 	if tree.String() != expect {
-		fmt.Printf("Bad tree '%s', expected '%s'\n", tree.String(), expect)
-		t.FailNow()
+		failWith(t, fmt.Sprintf("Bad tree '%s', expected '%s'\n", tree.String(), expect))
 	}
 }
 
@@ -24,20 +23,29 @@ func testEqual(t *testing.T, actual any, expected any, msg string) {
 
 func failIfNot(t *testing.T, cond bool, msg string) {
 	if !cond {
-		t.Log(msg)
-		fmt.Fprintln(os.Stderr, msg)
-		debug.PrintStack()
-		t.FailNow()
+		failWith(t, msg)
 	}
 }
 
 func failIfErrNow(t *testing.T, err any) {
 	if err != nil {
-		t.Log(err)
-		fmt.Fprintln(os.Stderr, err)
-		debug.PrintStack()
-		t.FailNow()
+		failWith(t, err)
 	}
+}
+
+func failWith(t *testing.T, msg any) {
+	t.Log(msg)
+	fmt.Fprintln(os.Stderr, msg)
+	debug.PrintStack()
+	t.FailNow()
+}
+
+func TestConcat(t *testing.T) {
+	d1 := NewDocument("aaa")
+	d1.Replace("peer", 2, 1, "")
+	d2 := NewDocument("aa")
+	d2.Replace("peer", 1, 1, "")
+	d1.Ops.Concat(d2.Ops).ToSlice()
 }
 
 func TestDoc(t *testing.T) {
@@ -89,16 +97,26 @@ func docs(t *testing.T) (*Document, *Document) {
 	return docONE(t, "peer1"), docTWO(t, "peer2")
 }
 
+func replaceAll(t *testing.T, doc *Document, peer string, edits []Replacement, expected string) {
+	for _, r := range edits {
+		replace(t, doc, peer, r.Offset, r.Length, r.Text)
+	}
+	testEqual(t, doc.String(), expected, "unsuccessful reversal")
+}
+
 func TestMerge(t *testing.T) {
 	a, b := docs(t)
 	a.Merge(b)
 	testEqual(t, a.String(), docMerged, "unsuccessful merge")
+	replaceAll(t, a.Freeze(), "peer1", a.ReverseEdits(), doc1)
+	backForward := a.Freeze()
+	backForward.Apply("peer1", a.ReverseEdits())
+	backForward.Apply("peer1", a.Edits())
+	testEqual(t, backForward.String(), a.String(), "backForward is wrong")
+	backForward.Simplify()
+	testEqual(t, len(backForward.Edits()), 0, "extra edits in backForward document")
 	a, b = docs(t)
 	b.Merge(a)
 	testEqual(t, b.String(), docMerged, "unsuccessful merge")
-	revDoc := b.Freeze()
-	for _, r := range b.ReverseEdits() {
-		replace(t, revDoc, "peer1", r.Offset, r.Length, r.Text)
-	}
-	testEqual(t, revDoc.String(), doc1, "unsuccessful reversal")
+	replaceAll(t, b.Freeze(), "peer1", b.ReverseEdits(), doc1)
 }
