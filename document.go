@@ -20,9 +20,9 @@ type Document struct {
 }
 
 type Replacement struct {
-	Offset int
-	Length int
-	Text   string
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+	Text   string `json:"text"`
 }
 
 type OpMeasurer bool
@@ -105,6 +105,11 @@ func (s Set[T]) Union(s2 Set[T]) Set[T] {
 
 func (s Set[T]) Add(op T) Set[T] {
 	s[op] = true
+	return s
+}
+
+func (s Set[T]) Remove(op T) Set[T] {
+	delete(s, op)
 	return s
 }
 
