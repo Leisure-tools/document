@@ -96,9 +96,9 @@ func (s Set[T]) Merge(s2 Set[T]) Set[T] {
 
 func (s Set[T]) Union(s2 Set[T]) Set[T] {
 	if len(s) == 0 {
-		return s
-	} else if len(s2) == 0 {
 		return s2
+	} else if len(s2) == 0 {
+		return s
 	}
 	return s.Copy().Merge(s2)
 }
@@ -264,14 +264,10 @@ func (i *InsertOp) Merge(m *Merger) bool {
 			i, opB = opB, i
 		}
 		return m.shiftBoth(i, opB)
-	default:
+	default: // MarkerOp
 		m.appendOps(i)
 		return m.shiftA(opB)
 	}
-}
-
-func NewMarkerOp(names ...string) *MarkerOp {
-	return &MarkerOp{NewSet(names...)}
 }
 
 func (s *MarkerOp) String() string {
@@ -292,16 +288,14 @@ func (s *MarkerOp) Measure() Measure {
 
 func (opA *MarkerOp) Merge(m *Merger) bool {
 	switch opB := m.OpB.(type) {
-	case *RetainOp:
-		m.appendOps(opA)
-		return m.shiftA(opB)
+	case *MarkerOp:
+		return m.shiftBoth(&MarkerOp{opA.Names.Union(opB.Names)})
 	case *SkipOp, *InsertOp:
 		m.swap() // handle in the case above
 		return true
-	case *MarkerOp:
-		return m.shiftBoth(&MarkerOp{opA.Names.Union(opB.Names)})
-	default:
-		return m.shiftBoth(opA, opB)
+	default: //case *RetainOp:
+		m.appendOps(opA)
+		return m.shiftA(opB)
 	}
 }
 
@@ -462,8 +456,12 @@ func (d *Document) OpString(verbose ...bool) string {
 }
 
 func (d *Document) Changes(prefix string) string {
+	return Changes(prefix, d.Ops)
+}
+
+func Changes(prefix string, ops OpTree) string {
 	sb := &strings.Builder{}
-	for _, op := range d.Ops.ToSlice() {
+	for _, op := range ops.ToSlice() {
 		switch op := op.(type) {
 		case *MarkerOp:
 			fmt.Fprintf(sb, "%s> %s\n", prefix, strings.Join(op.Names.ToSlice(), ", "))
@@ -602,7 +600,15 @@ func getLeftSkip(t OpTree) (OpTree, *SkipOp, OpTree) {
 func RemoveMarker(tree OpTree, name string) OpTree {
 	left, right := SplitOnMarker(tree, name)
 	if !right.IsEmpty() {
-		tree = left.Concat(right.RemoveFirst())
+		if m, ok := right.PeekFirst().(*MarkerOp); ok {
+			if len(m.Names) == 1 {
+				return left.Concat(right.RemoveFirst())
+			} else {
+				return left.Concat(right.RemoveFirst().AddFirst(&MarkerOp{m.Names.Copy().Remove(name)}))
+			}
+		} else {
+			panic(fmt.Errorf("Internal document error, split on a marker but right side did not start with a marker"))
+		}
 	}
 	return tree
 }
@@ -663,6 +669,19 @@ func (d *Document) Merge(b *Document) {
 
 func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
 	return SplitOnMarker(d.Ops, name)
+}
+
+func (d *Document) Mark(peer, name string, offset int) {
+	ops := RemoveMarker(d.Ops, name)
+	m := NewSet(name)
+	left, right := SplitNew(ops, offset)
+	if !left.IsEmpty() {
+		if prevMarker, ok := left.PeekLast().(*MarkerOp); ok {
+			d.Ops = left.RemoveLast().AddLast(&MarkerOp{prevMarker.Names.Union(m)}).Concat(right)
+			return
+		}
+	}
+	d.Ops = left.AddLast(&MarkerOp{m}).Concat(right)
 }
 
 // append edits that restore the original document
