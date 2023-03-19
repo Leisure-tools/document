@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-func replace(t *testing.T, tree *Document, peer string, start int, length int, text string) {
+func replace(t *testing.T, tree *Document, id string, offset, start, length int, text string) {
 	str := tree.String()
-	tree.Replace(peer, start, length, text)
+	tree.Replace(id, offset, start, length, text)
 	expect := fmt.Sprintf("%s%s%s", str[0:start], text, str[start+length:])
 	if tree.String() != expect {
 		failWith(t, fmt.Sprintf("Bad tree '%s', expected '%s'\n", tree.String(), expect))
@@ -42,20 +42,20 @@ func failWith(t *testing.T, msg any) {
 
 func TestConcat(t *testing.T) {
 	d1 := NewDocument("aaa")
-	d1.Replace("peer", 2, 1, "")
+	d1.Replace("peer", 0, 2, 1, "")
 	d2 := NewDocument("aa")
-	d2.Replace("peer", 1, 1, "")
+	d2.Replace("peer", 0, 1, 1, "")
 	d1.Ops.Concat(d2.Ops).ToSlice()
 }
 
 func TestDoc(t *testing.T) {
 	doc := NewDocument("aaaaa")
-	replace(t, doc, "peer", 0, 0, "hello")
-	replace(t, doc, "peer", 1, 2, "d")
+	replace(t, doc, "peer", 0, 0, 0, "hello")
+	replace(t, doc, "peer", 5, 1, 2, "d")
 	doc = NewDocument("aaaaa")
-	replace(t, doc, "peer", 3, 1, "hello")
-	replace(t, doc, "peer", 2, 2, "")
-	replace(t, doc, "peer", 0, 0, "bbb")
+	replace(t, doc, "peer", 0, 3, 1, "hello")
+	replace(t, doc, "peer", 5, 2, 2, "")
+	replace(t, doc, "peer", 5, 0, 0, "bbb")
 }
 
 const doc1 = `line one
@@ -81,15 +81,15 @@ func index(str string, line, col int) int {
 
 func docONE(t *testing.T, peer string) *Document {
 	doc := NewDocument(doc1)
-	replace(t, doc, peer, index(doc1, 0, 5), 3, "ONE")
-	replace(t, doc, peer, index(doc1, 2, 10), 0, "\nline four")
+	replace(t, doc, peer, 0, index(doc1, 0, 5), 3, "ONE")
+	replace(t, doc, peer, 3, index(doc1, 2, 10), 0, "\nline four")
 	return doc
 }
 
 func docTWO(t *testing.T, peer string) *Document {
 	doc := NewDocument(doc1)
-	replace(t, doc, peer, index(doc1, 1, 5), 3, "TWO")
-	replace(t, doc, peer, index(doc1, 2, 10), 0, "\nline five")
+	replace(t, doc, peer, 0, index(doc1, 1, 5), 3, "TWO")
+	replace(t, doc, peer, 3, index(doc1, 2, 10), 0, "\nline five")
 	return doc
 }
 
@@ -97,11 +97,27 @@ func docs(t *testing.T) (*Document, *Document) {
 	return docONE(t, "peer1"), docTWO(t, "peer2")
 }
 
-func replaceAll(t *testing.T, doc *Document, peer string, edits []Replacement, expected string) {
+func replaceAll(t *testing.T, doc *Document, id string, edits []Replacement, expected string) {
+	offset := 0
 	for _, r := range edits {
-		replace(t, doc, peer, r.Offset, r.Length, r.Text)
+		replace(t, doc, id, offset, r.Offset, r.Length, r.Text)
+		offset += r.Length
 	}
 	testEqual(t, doc.String(), expected, "unsuccessful reversal")
+}
+
+var bools = []bool{}
+
+func changes(d *Document) {
+	fmt.Println(d.Changes(""))
+}
+
+func ops(d *Document) {
+	fmt.Println(d.OpString(true))
+}
+
+func toSlice(d *Document) []Operation {
+	return d.Ops.ToSlice()
 }
 
 func TestMerge(t *testing.T) {
@@ -119,4 +135,8 @@ func TestMerge(t *testing.T) {
 	b.Merge(a)
 	testEqual(t, b.String(), docMerged, "unsuccessful merge")
 	replaceAll(t, b.Freeze(), "peer1", b.ReverseEdits(), doc1)
+	// uncomment these to make the functions availble while debugging
+	//changes(a)
+	//ops(a)
+	//fmt.Println(toSlice(a))
 }
