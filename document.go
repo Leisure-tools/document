@@ -68,12 +68,11 @@ type Merger struct {
 	Swapped              bool
 	OpA, OpB             Operation
 	Result, TreeA, TreeB ft.FingerTree[OpMeasurer, Operation, Measure]
-	BaseRepls            map[string]ft.FingerTree[OpMeasurer, Operation, Measure]
+	BaseEdits            map[string]ft.FingerTree[OpMeasurer, Operation, Measure]
 	ReplMap              map[ReplId]Operation
 	Shared               Set[string]
 	Used                 Set[ReplId]
 	Marked               Set[string]
-	ReplStrings          map[string]string
 }
 
 type MarkerOp struct {
@@ -435,42 +434,24 @@ func isEdit(op Operation) bool {
 	return !isMarker
 }
 
-func getRepls(replMap map[string]OpTree, ops OpTree, replStrings map[string]string) {
+func getEdits(ops OpTree) map[string]OpTree {
+	editMap := make(map[string]OpTree, 8)
 	maxLen := make(map[string]int, 8)
 	ops.Each(func(op Operation) bool {
 		if isEdit(op) {
-			id := Owner(op)
-			if maxLen[id] < ReplEnd(op) {
-				maxLen[id] = ReplEnd(op)
+			owner := Owner(op)
+			if maxLen[owner] < ReplEnd(op) {
+				maxLen[owner] = ReplEnd(op)
 			}
-			repls := replMap[id]
-			if repls.IsZero() {
-				repls = emptyOpTree
+			edits := editMap[owner]
+			if edits.IsZero() {
+				edits = emptyOpTree
 			}
-			replMap[id] = repls.AddLast(op)
+			editMap[owner] = edits.AddLast(op)
 		}
 		return true
 	})
-	for id, opTree := range replMap {
-		if replStrings != nil && replStrings[id] == "" {
-			bytes := make([]byte, maxLen[id])
-			opTree.Each(func(op Operation) bool {
-				copy(bytes[ReplOffset(op):], []byte(op.GetText()))
-				return true
-			})
-			replStrings[id] = string(bytes)
-			opTree.Each(func(op Operation) bool {
-				off := ReplOffset(op)
-				switch tOp := op.(type) {
-				case *InsertOp:
-					tOp.Text = replStrings[Owner(op)][off : off+Len(op)]
-				case *DeleteOp:
-					tOp.Text = replStrings[Owner(op)][off : off+Len(op)]
-				}
-				return true
-			})
-		}
-	}
+	return editMap
 }
 
 type ReplMergeState struct {
@@ -496,30 +477,30 @@ func (s *ReplMergeState) shiftMarks() {
 	}
 }
 
-func CopyWithOffset[T Operation](op T, offset int) T {
-	result := op.CopyWith(offset, op.GetText()[offset-ReplOffset(op):]).(T)
-	return result
-}
-
-func CopyWithLength[T Operation](op T, length int) T {
-	result := op.CopyWith(ReplOffset(op), op.GetText()[:length]).(T)
-	return result
-}
-
-func SplitOp[T Operation](op T, split int) (T, T) {
-	return CopyWithLength(op, split-ReplOffset(op)), CopyWithOffset(op, split)
+func SplitOp(op Operation, split int) (Operation, Operation) {
+	splitPoint := split - ReplOffset(op)
+	a := op.CopyWith(ReplOffset(op), op.GetText()[:splitPoint])
+	b := op.CopyWith(split, op.GetText()[splitPoint:])
+	return a, b
 }
 
 func replMerge(a, b *ReplMergeState) Operation {
 	a.shiftMarks()
 	b.shiftMarks()
-	if ReplEnd(b.op) < ReplEnd(a.op) {
+	if a.op != nil && b.op != nil && ReplEnd(b.op) < ReplEnd(a.op) {
 		a, b = b, a
 	}
 	aOp := a.op
 	bOp := b.op
-	a.shift()
-	if ReplEnd(aOp) == ReplEnd(bOp) {
+	if a.op != nil {
+		a.shift()
+	} else {
+		b.shift()
+		return bOp
+	}
+	if b.op == nil {
+		return aOp
+	} else if ReplEnd(aOp) == ReplEnd(bOp) {
 		b.shift()
 	} else {
 		first, second := SplitOp(bOp, ReplEnd(aOp))
@@ -532,8 +513,8 @@ func replMerge(a, b *ReplMergeState) Operation {
 	return bOp
 }
 
-// compute merged repls for an owner
-func mergeRepls(current, incoming OpTree) OpTree {
+// compute merged edits for an owner
+func mergeEdits(current, incoming OpTree) OpTree {
 	if current.IsEmpty() {
 		return current
 	}
@@ -671,21 +652,21 @@ func (m *Merger) shiftUsed() bool {
 // Merge operations from the same ancestor document into this one
 func (m *Merger) merge(b *Document) {
 	m.TreeB = b.Ops
-	incomingRepls := make(map[string]OpTree)
-	getRepls(incomingRepls, b.Ops, m.ReplStrings)
-	for owner, incoming := range incomingRepls {
-		repls := incoming
-		if !m.BaseRepls[owner].IsZero() {
-			repls = mergeRepls(m.BaseRepls[owner], incoming)
-			delete(m.BaseRepls, owner)
+	b.renumber()
+	incomingEdits := getEdits(b.Ops)
+	for owner, incoming := range incomingEdits {
+		edits := incoming
+		if !m.BaseEdits[owner].IsZero() {
+			edits = mergeEdits(m.BaseEdits[owner], incoming)
+			delete(m.BaseEdits, owner)
 			m.Shared.Add(owner)
 		}
-		repls.Each(func(op Operation) bool {
+		edits.Each(func(op Operation) bool {
 			m.ReplMap[op.GetId()] = op
 			return true
 		})
 	}
-	for _, base := range m.BaseRepls {
+	for _, base := range m.BaseEdits {
 		base.Each(func(op Operation) bool {
 			m.ReplMap[op.GetId()] = op
 			return true
@@ -719,6 +700,44 @@ func NewDocument(text ...string) *Document {
 		return &Document{newOpTree(&InsertOp{Text: sb.String()})}
 	}
 	return &Document{newOpTree()}
+}
+
+func (d *Document) renumber() {
+	ops := d.Ops.ToSlice()
+	maxLen := make(map[string]int, 8)
+	for _, op := range ops {
+		maxLen[Owner(op)] += Len(op)
+	}
+	stringBytes := make(map[string][]byte, 8)
+	for owner, len := range maxLen {
+		stringBytes[owner] = make([]byte, 0, len)
+	}
+	for _, op := range ops {
+		if Len(op) > 0 {
+			l := len(stringBytes[Owner(op)])
+			stringBytes[Owner(op)] = stringBytes[Owner(op)][:l+Len(op)]
+			copy(stringBytes[Owner(op)][l:], []byte(op.GetText()))
+		}
+	}
+	strings := make(map[string]string, 8)
+	for owner, bytes := range stringBytes {
+		strings[owner] = string(bytes)
+	}
+	offs := make(map[string]int, 8)
+	newOps := emptyOpTree
+	for _, op := range ops {
+		owner := Owner(op)
+		offset := offs[owner]
+		switch op.(type) {
+		case *InsertOp, *DeleteOp:
+			newText := strings[owner][offset : offset+Len(op)]
+			newOps = newOps.AddLast(op.CopyWith(offset, newText))
+		default:
+			newOps = newOps.AddLast(op)
+		}
+		offs[Owner(op)] += Len(op)
+	}
+	d.Ops = newOps
 }
 
 func (d *Document) Copy() *Document {
@@ -955,17 +974,16 @@ func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
 }
 
 func (d *Document) NewMerger() *Merger {
+	d.renumber()
 	m := &Merger{
-		Result:      emptyOpTree,
-		TreeA:       d.Ops,
-		BaseRepls:   make(map[string]OpTree),
-		ReplMap:     make(map[ReplId]Operation, 8),
-		Used:        NewSet[ReplId](),
-		Shared:      NewSet[string](),
-		ReplStrings: make(map[string]string, 8),
+		Result:    emptyOpTree,
+		TreeA:     d.Ops,
+		BaseEdits: getEdits(d.Ops),
+		ReplMap:   make(map[ReplId]Operation, 8),
+		Used:      NewSet[ReplId](),
+		Shared:    NewSet[string](),
 	}
-	getRepls(m.BaseRepls, d.Ops, m.ReplStrings)
-	for _, ops := range m.BaseRepls {
+	for _, ops := range m.BaseEdits {
 		ops.Each(func(op Operation) bool {
 			m.ReplMap[op.GetId()] = op
 			return true
@@ -1029,6 +1047,32 @@ func (d *Document) ReverseEdits() []Replacement {
 		edits = append(edits, repl)
 	}
 	return edits
+}
+
+// insert <--> delete
+// newBase ops are transformed to ""
+// "" ops are transformed to oldBase
+func (d *Document) Reversed(oldBase, newBase string) *Document {
+	tree := emptyOpTree
+	d.Ops.Each(func(oldOp Operation) bool {
+		owner := Owner(oldOp)
+		if owner == "" {
+			owner = oldBase
+		} else if owner == newBase {
+			owner = ""
+		}
+		id := ReplId{owner, ReplOffset(oldOp)}
+		switch op := oldOp.(type) {
+		case *InsertOp:
+			tree = tree.AddLast(&DeleteOp{id, op.Text})
+		case *DeleteOp:
+			tree = tree.AddLast(&InsertOp{id, op.Text})
+		case *MarkerOp:
+			tree = tree.AddLast(op)
+		}
+		return true
+	})
+	return &Document{tree}
 }
 
 // append Edits that restore the original document
@@ -1152,8 +1196,7 @@ func (d *Document) Simplify() {
 }
 
 func removeTrivialDeletes(ops OpTree) OpTree {
-	replMap := make(map[string]OpTree, 8)
-	getRepls(replMap, ops, nil)
+	replMap := getEdits(ops)
 	allDeletes := NewSet[string]()
 	for owner, ops := range replMap {
 		if owner != "" && ops.Measure().Width == 0 {
@@ -1170,16 +1213,23 @@ func removeTrivialDeletes(ops OpTree) OpTree {
 	return newOps
 }
 
-func (d *Document) Apply(id string, edits []Replacement) {
-	offset := 0
+func (d *Document) Apply(id string, offset int, edits []Replacement) {
 	for _, repl := range edits {
 		d.Replace(id, offset, repl.Offset, repl.Length, repl.Text)
 		offset += repl.Length
 	}
 }
 
-func Apply(id, str string, repl []Replacement) string {
+func Apply(id, str string, offset int, repl []Replacement) string {
 	doc := NewDocument(id, str)
-	doc.Apply(id, repl)
+	doc.Apply(id, offset, repl)
 	return doc.String()
+}
+
+func Width(repl []Replacement) int {
+	width := 0
+	for _, r := range repl {
+		width += len(r.Text)
+	}
+	return width
 }
