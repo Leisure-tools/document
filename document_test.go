@@ -45,7 +45,7 @@ func TestConcat(t *testing.T) {
 	d1.Replace("peer", 0, 2, 1, "")
 	d2 := NewDocument("aa")
 	d2.Replace("peer", 0, 1, 1, "")
-	d1.Ops.Concat(d2.Ops).ToSlice()
+	d1.ops.Concat(d2.ops).ToSlice()
 }
 
 func TestDoc(t *testing.T) {
@@ -117,7 +117,7 @@ func ops(d *Document) {
 }
 
 func toSlice(d *Document) []Operation {
-	return d.Ops.ToSlice()
+	return d.ops.ToSlice()
 }
 
 func TestMerge(t *testing.T) {

@@ -16,7 +16,8 @@ type Set[T comparable] map[T]bool
 type OpTree = ft.FingerTree[OpMeasurer, Operation, Measure]
 
 type Document struct {
-	Ops OpTree
+	ops       OpTree
+	opStrings map[string]string
 }
 
 type Replacement struct {
@@ -37,7 +38,7 @@ type ReplId struct {
 }
 
 type Operation interface {
-	OpString(offset int, verbose ...bool) string
+	OpString(offset int, verbose bool) string
 	GetId() ReplId
 	GetText() string
 	CopyWith(offset int, text string) Operation
@@ -73,6 +74,10 @@ type Merger struct {
 	Shared               Set[string]
 	Used                 Set[ReplId]
 	Marked               Set[string]
+	opStrings            map[string]string
+	last                 Operation
+	seenA                Operation
+	seenB                Operation
 }
 
 type MarkerOp struct {
@@ -206,9 +211,9 @@ func (d *DeleteOp) String() string {
 	return ""
 }
 
-func (d *DeleteOp) OpString(offset int, verbose ...bool) string {
+func (d *DeleteOp) OpString(offset int, verbose bool) string {
 	verboseStr := ""
-	if len(verbose) > 0 {
+	if verbose {
 		verboseStr = ", " + strings.ReplaceAll(d.Text, "\n", "\\n")
 	}
 	return fmt.Sprintf("delete[%s%s](%d, %d)", d.Id.Owner, verboseStr, offset, d.Len())
@@ -242,16 +247,12 @@ func (d *DeleteOp) Measure() Measure {
 }
 
 func (d *DeleteOp) Merge(m *Merger) bool {
-	if _, isMarker := m.OpB.(*MarkerOp); isMarker || m.isShared(d) && !m.isShared(m.OpB) {
-		return m.swap()
-	}
 	m.sliceForMerge()
 	if d.Id == m.OpB.GetId() {
 		m.sliceB()
 		return m.shiftBoth(m.OpA) // sliceForMerged may have changed opA
 	}
-	m.appendOps(m.OpA)
-	return m.shiftA(m.OpB)
+	return m.shiftA(m.OpA)
 }
 
 func (d *DeleteOp) CopyWith(offset int, text string) Operation {
@@ -266,7 +267,7 @@ func (i *InsertOp) GetId() ReplId {
 	return i.Id
 }
 
-func (i *InsertOp) OpString(offset int, verbose ...bool) string {
+func (i *InsertOp) OpString(offset int, verbose bool) string {
 	return fmt.Sprintf("insert[%s, %d](%d, '%s')", i.Id.Owner, i.Id.ReplOffset, offset, i.Text)
 }
 
@@ -282,18 +283,20 @@ func (i *InsertOp) Measure() Measure {
 }
 
 func (i *InsertOp) Merge(m *Merger) bool {
-	if _, isMarker := m.OpB.(*MarkerOp); isMarker || m.isShared(i) && !m.isShared(m.OpB) {
-		return m.swap()
-	}
-	m.sliceForMerge()
-	if i.Id == m.OpB.GetId() {
+	if !m.sliceForMerge() {
+		if i.Id == m.OpB.GetId() {
+			// this should be impossible because of priority
+			//panic("Wha?")
+			return m.swap()
+		}
+		return m.shiftA()
+	} else if i.Id == m.OpB.GetId() {
 		m.sliceB()
 		return m.shiftBoth(m.OpB)
-	} else if b, bIsIns := m.OpB.(*InsertOp); bIsIns {
-		if !m.isShared(i) && (m.isShared(b) || Owner(i) < Owner(b)) {
-			m.appendOps(m.OpA)
-			return m.shiftA(m.OpB)
-		}
+	} else if _, bIsIns := m.OpB.(*InsertOp); bIsIns {
+		return m.shiftA(m.OpA)
+	} else if d, dIsDel := m.OpB.(*DeleteOp); dIsDel && Owner(i) != Owner(d) {
+		return m.shiftA(m.OpA)
 	}
 	return m.swap()
 }
@@ -306,7 +309,7 @@ func (m *MarkerOp) String() string {
 	return ""
 }
 
-func (m *MarkerOp) OpString(offset int, verbose ...bool) string {
+func (m *MarkerOp) OpString(offset int, verbose bool) string {
 	return fmt.Sprintf("marker(%s, %d)", strings.Join(m.Names.ToSlice(), ", "), offset)
 }
 
@@ -328,18 +331,19 @@ func (m *MarkerOp) Measure() Measure {
 
 func (opA *MarkerOp) Merge(m *Merger) bool {
 	n := opA.Names.Copy()
-	mar, isMarker := m.OpB.(*MarkerOp)
-	if isMarker {
+	mar, isBMarker := m.OpB.(*MarkerOp)
+	if isBMarker {
 		n.Union(mar.Names)
 	}
 	n.Compliment(m.Marked)
 	if !n.IsEmpty() {
 		m.appendOps(&MarkerOp{n})
 	}
-	if isMarker {
+	m.Marked.Merge(n)
+	if isBMarker {
 		return m.shiftBoth()
 	}
-	return m.shiftA(m.OpB)
+	return m.shiftA()
 }
 
 ///
@@ -469,10 +473,7 @@ func (s *ReplMergeState) shift() {
 }
 
 func (s *ReplMergeState) shiftMarks() {
-	for {
-		if _, isMark := s.op.(*MarkerOp); !isMark {
-			break
-		}
+	for !isEdit(s.op) {
 		s.shift()
 	}
 }
@@ -567,21 +568,21 @@ func (m *Merger) shiftBoth(newOps ...Operation) bool {
 }
 
 func (m *Merger) shiftAndSwap() bool {
-	result := m.shiftA(m.OpB)
+	result := m.shiftA()
 	if result {
 		m.swap()
 	}
 	return result
 }
 
-func (m *Merger) shiftA(newB Operation) bool {
+func (m *Merger) shiftA(appends ...Operation) bool {
+	m.appendOps(appends...)
 	if !m.TreeA.IsEmpty() {
-		m.OpB = newB
 		m.OpA = m.TreeA.PeekFirst()
 		m.TreeA = m.TreeA.RemoveFirst()
 		return true
 	}
-	m.appendOps(newB)
+	m.appendOps(m.OpB)
 	m.Result = m.Result.Concat(m.TreeA.Concat(m.TreeB))
 	return false
 }
@@ -626,13 +627,14 @@ func (m *Merger) appendOps(ops ...Operation) {
 			if !m.Result.IsEmpty() && contiguous(m.Result.PeekLast(), op) {
 				// merge contiguous changes
 				prev := m.Result.PeekLast()
-				// we can expand text because it came from the original repl's text
-				text := prev.GetText()[:ReplEnd(op)-ReplOffset(prev)]
+				//text := m.opStrings[Owner(prev)][ReplOffset(prev):ReplEnd(op)]
+				//text := prev.GetText()[:ReplEnd(op)-ReplOffset(prev)]
+				text := prev.GetText() + op.GetText()
 				m.Result = m.Result.RemoveLast().AddLast(prev.CopyWith(ReplOffset(prev), text))
 			} else {
 				m.Result = m.Result.AddLast(op)
 			}
-			if _, isMarker := op.(*MarkerOp); !isMarker {
+			if isEdit(op) {
 				m.Used.Add(op.GetId())
 			}
 		}
@@ -642,7 +644,7 @@ func (m *Merger) appendOps(ops ...Operation) {
 func (m *Merger) shiftUsed() bool {
 	m.swap()
 	for m.Used.Has(m.OpA.GetId()) {
-		if !m.shiftA(m.OpB) {
+		if !m.shiftA() {
 			return false
 		}
 	}
@@ -651,9 +653,11 @@ func (m *Merger) shiftUsed() bool {
 
 // Merge operations from the same ancestor document into this one
 func (m *Merger) merge(b *Document) {
-	m.TreeB = b.Ops
-	b.renumber()
-	incomingEdits := getEdits(b.Ops)
+	m.TreeB = b.ops
+	for owner, str := range b.opStrings {
+		m.opStrings[owner] = str
+	}
+	incomingEdits := getEdits(b.ops)
 	for owner, incoming := range incomingEdits {
 		edits := incoming
 		if !m.BaseEdits[owner].IsZero() {
@@ -677,10 +681,40 @@ func (m *Merger) merge(b *Document) {
 		cont = false
 		if m.shiftUsed() {
 			if m.shiftUsed() {
-				cont = m.OpA.Merge(m)
+				if m.hasPriority(m.OpA, m.OpB) || !m.hasPriority(m.OpB, m.OpA) {
+					cont = m.OpA.Merge(m)
+				} else {
+					cont = m.swap()
+				}
+				m.checkInfinite()
 			}
 		}
 	}
+}
+
+func (m *Merger) checkInfinite() {
+	if (m.Result.IsEmpty() || m.last == m.Result.PeekLast()) &&
+		(m.seenA == m.OpA || m.seenB == m.OpA) {
+		panic("Internal error, cannot complete merge!")
+	}
+	if !m.Result.IsEmpty() {
+		m.last = m.Result.PeekLast()
+	}
+	m.seenA, m.seenB = m.OpA, m.seenA
+}
+
+func (m *Merger) hasPriority(a, b Operation) bool {
+	_, bIsIns := b.(*InsertOp)
+	return !isEdit(a) ||
+		!m.isShared(a) && m.isShared(b) ||
+		!m.isShared(a) && !m.isShared(b) && Owner(a) < Owner(b) ||
+		Owner(a) == Owner(b) && ReplOffset(a) < ReplOffset(b) ||
+		bIsIns && m.isDeleted(b)
+}
+
+func (m *Merger) isDeleted(op Operation) bool {
+	_, isDel := m.ReplMap[op.GetId()].(*DeleteOp)
+	return isDel
 }
 
 ///
@@ -697,47 +731,60 @@ func NewDocument(text ...string) *Document {
 		for _, t := range text {
 			sb.WriteString(t)
 		}
-		return &Document{newOpTree(&InsertOp{Text: sb.String()})}
+		return &Document{newOpTree(&InsertOp{Text: sb.String()}), make(map[string]string, 8)}
 	}
-	return &Document{newOpTree()}
+	return &Document{newOpTree(), make(map[string]string, 8)}
 }
 
-func (d *Document) renumber() {
-	ops := d.Ops.ToSlice()
+func (d *Document) GetOps() OpTree {
+	return d.ops
+}
+
+func (d *Document) SetOps(newOps OpTree) {
+	ops := newOps.ToSlice()
 	maxLen := make(map[string]int, 8)
 	for _, op := range ops {
 		maxLen[Owner(op)] += Len(op)
 	}
 	stringBytes := make(map[string][]byte, 8)
 	for owner, len := range maxLen {
-		stringBytes[owner] = make([]byte, 0, len)
-	}
-	for _, op := range ops {
-		if Len(op) > 0 {
-			l := len(stringBytes[Owner(op)])
-			stringBytes[Owner(op)] = stringBytes[Owner(op)][:l+Len(op)]
-			copy(stringBytes[Owner(op)][l:], []byte(op.GetText()))
+		// don't recompute existing op strings
+		if d.opStrings[owner] == "" {
+			stringBytes[owner] = make([]byte, 0, len)
 		}
 	}
-	strings := make(map[string]string, 8)
+	for _, op := range ops {
+		owner := Owner(op)
+		if Len(op) > 0 && stringBytes[owner] != nil {
+			l := len(stringBytes[owner])
+			stringBytes[owner] = stringBytes[owner][:l+Len(op)]
+			copy(stringBytes[owner][l:], []byte(op.GetText()))
+		}
+	}
 	for owner, bytes := range stringBytes {
-		strings[owner] = string(bytes)
+		if len(stringBytes[owner]) > 0 {
+			d.opStrings[owner] = string(bytes)
+		}
 	}
 	offs := make(map[string]int, 8)
-	newOps := emptyOpTree
+	newOps = emptyOpTree
 	for _, op := range ops {
 		owner := Owner(op)
 		offset := offs[owner]
 		switch op.(type) {
 		case *InsertOp, *DeleteOp:
-			newText := strings[owner][offset : offset+Len(op)]
-			newOps = newOps.AddLast(op.CopyWith(offset, newText))
+			if len(stringBytes[owner]) > 0 {
+				newText := d.opStrings[owner][offset : offset+Len(op)]
+				newOps = newOps.AddLast(op.CopyWith(offset, newText))
+			} else {
+				newOps = newOps.AddLast(op)
+			}
 		default:
 			newOps = newOps.AddLast(op)
 		}
 		offs[Owner(op)] += Len(op)
 	}
-	d.Ops = newOps
+	d.ops = newOps
 }
 
 func (d *Document) Copy() *Document {
@@ -752,7 +799,7 @@ func (d *Document) Freeze() *Document {
 // string for the new document
 func (d *Document) String() string {
 	sb := &strings.Builder{}
-	for _, item := range d.Ops.ToSlice() {
+	for _, item := range d.ops.ToSlice() {
 		fmt.Fprint(sb, item)
 	}
 	return sb.String()
@@ -761,7 +808,7 @@ func (d *Document) String() string {
 // string for the original document
 func (d *Document) OriginalString() string {
 	sb := &strings.Builder{}
-	for _, item := range d.Ops.ToSlice() {
+	for _, item := range d.ops.ToSlice() {
 		switch op := item.(type) {
 		case *DeleteOp, *InsertOp:
 			if op.GetId().Owner == "" {
@@ -772,7 +819,7 @@ func (d *Document) OriginalString() string {
 	return sb.String()
 }
 
-func OpString(tree OpTree, verbose ...bool) string {
+func OpString(tree OpTree, verbose bool) string {
 	sb := &strings.Builder{}
 	pos := 0
 	first := true
@@ -782,18 +829,18 @@ func OpString(tree OpTree, verbose ...bool) string {
 		} else {
 			fmt.Fprint(sb, ", ")
 		}
-		fmt.Fprint(sb, item.OpString(pos, verbose...))
+		fmt.Fprint(sb, item.OpString(pos, verbose))
 		pos += item.Measure().Width
 	}
 	return sb.String()
 }
 
-func (d *Document) OpString(verbose ...bool) string {
-	return OpString(d.Ops, verbose...)
+func (d *Document) OpString(verbose bool) string {
+	return OpString(d.ops, verbose)
 }
 
 func (d *Document) Changes(prefix string) string {
-	return Changes(prefix, d.Ops)
+	return Changes(prefix, d.ops)
 }
 
 func Changes(prefix string, ops OpTree) string {
@@ -933,7 +980,10 @@ func RemoveMarker(tree OpTree, name string) OpTree {
 }
 
 func (d *Document) Replace(peerParent string, replOffset, start, length int, str string) {
-	left, right := SplitNew(d.Ops, start)
+	if length == 0 && len(str) == 0 {
+		return
+	}
+	left, right := SplitNew(d.ops, start)
 	for length > 0 {
 		if right.IsEmpty() {
 			panic("Delete past end of document")
@@ -964,7 +1014,7 @@ func (d *Document) Replace(peerParent string, replOffset, start, length int, str
 			str,
 		})
 	}
-	d.Ops = left.Concat(right)
+	d.SetOps(left.Concat(right))
 }
 
 func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
@@ -974,20 +1024,24 @@ func SplitOnMarker(tree OpTree, name string) (OpTree, OpTree) {
 }
 
 func (d *Document) NewMerger() *Merger {
-	d.renumber()
 	m := &Merger{
 		Result:    emptyOpTree,
-		TreeA:     d.Ops,
-		BaseEdits: getEdits(d.Ops),
+		TreeA:     d.ops,
+		BaseEdits: getEdits(d.ops),
 		ReplMap:   make(map[ReplId]Operation, 8),
 		Used:      NewSet[ReplId](),
 		Shared:    NewSet[string](),
+		opStrings: make(map[string]string, len(d.opStrings)),
+		Marked:    NewSet[string](),
 	}
 	for _, ops := range m.BaseEdits {
 		ops.Each(func(op Operation) bool {
 			m.ReplMap[op.GetId()] = op
 			return true
 		})
+	}
+	for owner, str := range d.opStrings {
+		m.opStrings[owner] = str
 	}
 	return m
 }
@@ -996,32 +1050,32 @@ func (d *Document) NewMerger() *Merger {
 func (d *Document) Merge(b *Document) {
 	m := d.NewMerger()
 	m.merge(b)
-	d.Ops = m.Result
+	d.SetOps(m.Result)
 }
 
 func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
-	return SplitOnMarker(d.Ops, name)
+	return SplitOnMarker(d.ops, name)
 }
 
 func (d *Document) Mark(name string, offset int) {
-	ops := RemoveMarker(d.Ops, name)
+	ops := RemoveMarker(d.ops, name)
 	m := NewSet(name)
 	left, right := SplitNew(ops, offset)
 	if !left.IsEmpty() {
 		if prevMarker, ok := left.PeekLast().(*MarkerOp); ok {
-			d.Ops = left.RemoveLast().AddLast(&MarkerOp{prevMarker.Names.Union(m)}).Concat(right)
+			d.SetOps(left.RemoveLast().AddLast(&MarkerOp{prevMarker.Names.Union(m)}).Concat(right))
 			return
 		}
 	}
-	d.Ops = left.AddLast(&MarkerOp{m}).Concat(right)
+	d.SetOps(left.AddLast(&MarkerOp{m}).Concat(right))
 }
 
 // append edits that restore the original document
 func (d *Document) ReverseEdits() []Replacement {
 	edits := make([]Replacement, 0, 8)
 	var repl Replacement
-	offset := d.Ops.Measure().Width
-	d.Ops.EachReverse(func(op Operation) bool {
+	offset := d.ops.Measure().Width
+	d.ops.EachReverse(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
 			if Owner(op) == "" {
@@ -1054,7 +1108,7 @@ func (d *Document) ReverseEdits() []Replacement {
 // "" ops are transformed to oldBase
 func (d *Document) Reversed(oldBase, newBase string) *Document {
 	tree := emptyOpTree
-	d.Ops.Each(func(oldOp Operation) bool {
+	d.ops.Each(func(oldOp Operation) bool {
 		owner := Owner(oldOp)
 		if owner == "" {
 			owner = oldBase
@@ -1072,7 +1126,9 @@ func (d *Document) Reversed(oldBase, newBase string) *Document {
 		}
 		return true
 	})
-	return &Document{tree}
+	ret := &Document{emptyOpTree, make(map[string]string, 8)}
+	ret.SetOps(tree)
+	return ret
 }
 
 // append Edits that restore the original document
@@ -1089,7 +1145,7 @@ func (d *Document) Edits() []Replacement {
 			repl.Text = ""
 		}
 	}
-	d.Ops.Each(func(op Operation) bool {
+	d.ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
 			if Owner(op) == "" {
@@ -1140,7 +1196,7 @@ func previousSkip(ins *InsertOp, ops []Operation) (int, *DeleteOp) {
 
 // remove non-source deletes
 func (d *Document) Simplify() {
-	ops := d.Ops.ToSlice()
+	ops := d.ops.ToSlice()
 	if len(ops) < 2 {
 		return
 	}
@@ -1191,8 +1247,8 @@ func (d *Document) Simplify() {
 		}
 		eat = true
 	}
-	d.Ops = removeTrivialDeletes(newOpTree(processed...))
-	//d.Ops = newOpTree(processed...)
+	d.SetOps(removeTrivialDeletes(newOpTree(processed...)))
+	//d.SetOps(newOpTree(processed...))
 }
 
 func removeTrivialDeletes(ops OpTree) OpTree {
@@ -1232,4 +1288,17 @@ func Width(repl []Replacement) int {
 		width += len(r.Text)
 	}
 	return width
+}
+
+///
+/// diag
+///
+
+func LenTree(tree OpTree) int {
+	l := 0
+	tree.Each(func(op Operation) bool {
+		l++
+		return true
+	})
+	return l
 }
