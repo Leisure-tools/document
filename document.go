@@ -1274,6 +1274,8 @@ func (d *Document) Apply(id string, offset int, edits []Replacement) {
 		d.Replace(id, offset, repl.Offset, repl.Length, repl.Text)
 		offset += repl.Length
 	}
+	delete(d.opStrings, id)
+	d.SetOps(d.ops)
 }
 
 func Apply(id, str string, offset int, repl []Replacement) string {
