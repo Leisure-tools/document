@@ -792,6 +792,7 @@ func (d *Document) Copy() *Document {
 	return &d2
 }
 
+// A new document based on a document's string with only one insert
 func (d *Document) Freeze() *Document {
 	return NewDocument(d.String())
 }
