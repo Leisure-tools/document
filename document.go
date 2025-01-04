@@ -2,6 +2,7 @@ package document
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	ft "github.com/leisure-tools/lazyfingertree"
@@ -101,19 +102,13 @@ func NewSet[T comparable](elements ...T) Set[T] {
 }
 
 func (s Set[T]) ToSlice() []T {
-	items := make([]T, 0, len(s))
+	items := make([]T, len(s))
+	i := 0
 	for item := range s {
-		items = append(items, item)
+		items[i] = item
+		i += 1
 	}
 	return items
-}
-
-func (s Set[T]) Copy() Set[T] {
-	result := Set[T]{}
-	for k, v := range s {
-		result[k] = v
-	}
-	return result
 }
 
 func (s Set[T]) Merge(s2 Set[T]) Set[T] {
@@ -121,6 +116,10 @@ func (s Set[T]) Merge(s2 Set[T]) Set[T] {
 		s[k] = v
 	}
 	return s
+}
+
+func (s Set[T]) Copy() Set[T] {
+	return Set[T]{}.Merge(s)
 }
 
 func (s Set[T]) Union(s2 Set[T]) Set[T] {
@@ -132,28 +131,83 @@ func (s Set[T]) Union(s2 Set[T]) Set[T] {
 	return s.Copy().Merge(s2)
 }
 
-func (s Set[T]) Compliment(s2 Set[T]) {
+func (s Set[T]) Compliment(s2 Set[T]) Set[T] {
 	for item := range s2 {
 		delete(s, item)
 	}
-}
-
-func (s Set[T]) Add(op T) Set[T] {
-	s[op] = true
 	return s
 }
 
-func (s Set[T]) Remove(op T) Set[T] {
-	delete(s, op)
+func (s Set[T]) Add(els ...T) Set[T] {
+	for _, el := range els {
+		s[el] = true
+	}
 	return s
 }
 
-func (s Set[T]) Has(op T) bool {
-	return s[op]
+func (s Set[T]) Remove(els ...T) Set[T] {
+	for _, el := range els {
+		delete(s, el)
+	}
+	return s
+}
+
+func (s Set[T]) Has(el T) bool {
+	return s[el]
 }
 
 func (s Set[T]) IsEmpty() bool {
 	return len(s) == 0
+}
+
+func (s Set[T]) String() string {
+	sl := s.ToSlice()
+	var f func(i, j int) bool
+	var strs []string
+	sortStrings := false
+
+	switch x := any(sl).(type) {
+	case []int:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []int8:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []int16:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []int32:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []int64:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uint:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uint8:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uint16:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uint32:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uint64:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []uintptr:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []float32:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	case []float64:
+		f = func(i, j int) bool { return x[i] < x[j] }
+	default:
+		// defer sorting until after string conversion
+		sortStrings = true
+	}
+	if f != nil {
+		sort.Slice(sl, f)
+	}
+	strs = make([]string, len(sl))
+	for i, v := range sl {
+		strs[i] = fmt.Sprint(v)
+	}
+	if sortStrings {
+		sort.Strings(strs)
+	}
+	return fmt.Sprintf("Set[%s]", strings.Join(strs, ", "))
 }
 
 ///
