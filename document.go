@@ -54,8 +54,9 @@ type Measure struct {
 }
 
 type DeleteOp struct {
-	Id   ReplId // "" means original text
-	Text string
+	Id       ReplId // id of the original insert, "" means original text
+	Text     string
+	Deleters []string
 }
 
 type InsertOp struct {
@@ -261,8 +262,22 @@ func RangesOverlap(off1, len1, off2, len2 int) bool {
 	return !(off1+len1 < off2 || off2+len2 < off1)
 }
 
+func isDelete(op any) bool {
+	_, isDel := op.(*DeleteOp)
+	return isDel
+}
+
 func (d *DeleteOp) String() string {
 	return ""
+}
+
+func (d *DeleteOp) HasDeleter(del string) bool {
+	for _, d := range d.Deleters {
+		if d == del {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DeleteOp) OpString(offset int, verbose bool) string {
@@ -310,7 +325,7 @@ func (d *DeleteOp) Merge(m *Merger) bool {
 }
 
 func (d *DeleteOp) CopyWith(offset int, text string) Operation {
-	return &DeleteOp{ReplId{d.Id.Owner, offset}, text}
+	return &DeleteOp{ReplId{d.Id.Owner, offset}, text, d.Deleters}
 }
 
 func (i *InsertOp) String() string {
@@ -614,6 +629,31 @@ func (m *Merger) shiftBoth(newOps ...Operation) bool {
 		m.TreeA = m.TreeA.RemoveFirst()
 		m.OpB = m.TreeB.PeekFirst()
 		m.TreeB = m.TreeB.RemoveFirst()
+		if Owner(m.OpA) == Owner(m.OpB) {
+			if dA, isDelA := m.OpA.(*DeleteOp); isDelA {
+				if dB, isDelB := m.OpB.(*DeleteOp); isDelB && dA.Text == dB.Text {
+					if len(dA.Deleters) == 0 {
+						dA.Deleters = dB.Deleters
+					} else if len(dB.Deleters) == 0 {
+						dB.Deleters = dA.Deleters
+					} else {
+						newdels := make([]string, len(dA.Deleters), len(dA.Deleters)+len(dB.Deleters))
+						copy(newdels, dA.Deleters)
+					outer:
+						for _, del := range dB.Deleters {
+							for _, cur := range newdels {
+								if del == cur {
+									continue outer
+								}
+							}
+							newdels = append(newdels, del)
+						}
+						dA.Deleters = newdels
+						dB.Deleters = newdels
+					}
+				}
+			}
+		}
 		return true
 	}
 	// one of the trees is empty, so just concat them both
@@ -841,6 +881,7 @@ func (d *Document) SetOps(newOps OpTree) {
 	d.ops = newOps
 }
 
+// Makes a top-level copy of a document since the internals are persistent
 func (d *Document) Copy() *Document {
 	d2 := *d
 	return &d2
@@ -905,21 +946,25 @@ func Changes(prefix string, ops OpTree) string {
 		case *MarkerOp:
 			fmt.Fprintf(sb, "%s> %s\n", prefix, strings.Join(op.Names.ToSlice(), ", "))
 		case *DeleteOp:
-			printOp(sb, prefix, "-", op.Text)
+			printOp(sb, prefix, "-", op.Text, op.Id.Owner, op.Deleters)
 		case *InsertOp:
 			if op.Id.Owner == "" {
-				printOp(sb, prefix, "=", op.Text)
+				printOp(sb, prefix, "=", op.Text, op.Id.Owner, nil)
 			} else {
-				printOp(sb, prefix, "+", op.Text)
+				printOp(sb, prefix, "+", op.Text, op.Id.Owner, nil)
 			}
 		}
 	}
 	return sb.String()
 }
 
-func printOp(sb *strings.Builder, lead, prefix, text string) {
+func printOp(sb *strings.Builder, lead, prefix, text, id string, deleters []string) {
 	for _, line := range strings.Split(text, "\n") {
-		fmt.Fprintf(sb, "%s%s%s%s\n", lead, prefix, line, prefix)
+		if deleters == nil {
+			fmt.Fprintf(sb, "%s%s%s%s [%s]\n", lead, prefix, line, prefix, id)
+		} else {
+			fmt.Fprintf(sb, "%s%s%s%s [%s]%v\n", lead, prefix, line, prefix, id, deleters)
+		}
 	}
 }
 
@@ -1049,10 +1094,12 @@ func (d *Document) Replace(peerParent string, replOffset, start, length int, str
 		case *DeleteOp, *MarkerOp:
 			left = left.AddLast(first)
 		case *InsertOp:
+			deleters := make([]string, 1, 4)
+			deleters[0] = peerParent
 			if length > len(op.Text) {
-				left = left.AddLast(&DeleteOp{op.Id, op.Text})
+				left = left.AddLast(&DeleteOp{op.Id, op.Text, deleters})
 			} else {
-				left = left.AddLast(&DeleteOp{op.Id, op.Text[:length]})
+				left = left.AddLast(&DeleteOp{op.Id, op.Text[:length], deleters})
 			}
 			if length < len(op.Text) {
 				right = right.AddFirst(&InsertOp{
@@ -1173,7 +1220,7 @@ func (d *Document) Reversed(oldBase, newBase string) *Document {
 		id := ReplId{owner, ReplOffset(oldOp)}
 		switch op := oldOp.(type) {
 		case *InsertOp:
-			tree = tree.AddLast(&DeleteOp{id, op.Text})
+			tree = tree.AddLast(&DeleteOp{id, op.Text, nil})
 		case *DeleteOp:
 			tree = tree.AddLast(&InsertOp{id, op.Text})
 		case *MarkerOp:
@@ -1225,6 +1272,59 @@ func (d *Document) Edits() []Replacement {
 		edits = append(edits, repl)
 	}
 	return edits
+}
+
+// return edits the owner made in this document
+func (d *Document) EditsFor(owner string, markers ...string) ([]Replacement, map[string]int) {
+	markerSet := NewSet(markers...)
+	edits := make([]Replacement, 0, 8)
+	hasRepl := false
+	var repl Replacement
+	offset := 0
+	markerPositions := make(map[string]int, len(markers))
+	ensureRepl := func() {
+		if !hasRepl {
+			hasRepl = true
+			repl.Offset = offset
+			repl.Length = 0
+			repl.Text = ""
+		}
+	}
+	addRepl := func() {
+		if hasRepl {
+			edits = append(edits, repl)
+			hasRepl = false
+		}
+	}
+	d.ops.Each(func(op Operation) bool {
+		switch op := op.(type) {
+		case *DeleteOp:
+			//if Owner(op) == owner {
+			if op.HasDeleter(owner) {
+				ensureRepl()
+				repl.Length += len(op.Text)
+			}
+		case *InsertOp:
+			if op.Id.Owner == owner {
+				ensureRepl()
+				repl.Text += op.Text
+			} else {
+				addRepl()
+			}
+			offset += len(op.Text)
+		case *MarkerOp:
+			for k := range op.Names {
+				if markerSet.Has(k) {
+					markerPositions[k] = offset
+				}
+			}
+		}
+		return true
+	})
+	if hasRepl {
+		edits = append(edits, repl)
+	}
+	return edits, markerPositions
 }
 
 func prevRetain(ops []Operation) *InsertOp {
@@ -1290,7 +1390,7 @@ func (d *Document) Simplify() {
 					// replace the skip with a retain
 					processed[iDel] = &InsertOp{Text: text}
 					if len(prevSkip.Text) > smaller {
-						processed[len(processed)-1] = &DeleteOp{Text: prevSkip.Text[smaller:]}
+						processed[len(processed)-1] = &DeleteOp{Text: prevSkip.Text[smaller:], Deleters: prevSkip.Deleters}
 					} else if len(op.Text) > smaller {
 						processed[len(processed)-1] = &InsertOp{op.Id, op.Text[smaller:]}
 					} else {
