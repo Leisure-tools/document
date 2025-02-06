@@ -141,3 +141,19 @@ func TestMerge(t *testing.T) {
 	//ops(a)
 	//fmt.Println(toSlice(a))
 }
+
+func TestChanges(t *testing.T) {
+	base := NewDocument("one\ntwo\n")
+	count := 1
+	d1 := base.Copy()
+	base.Replace("1"+fmt.Sprint(count), 0, 4, 3, "THREE")
+	count++
+	d2 := base.Copy()
+	base.Replace("2"+fmt.Sprint(count), 0, 4, 3, "FOUR")
+	d3 := d1.Copy()
+	d3.Merge(d2)
+	d1Ids := d1.GetOps().Measure().Ids
+	d3Ids := d3.GetOps().Measure().Ids
+	repls, _ := d3.EditsFor(d3Ids.Complement(d1Ids), nil)
+	fmt.Printf("REPLS: %#v\n", repls)
+}

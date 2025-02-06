@@ -8,6 +8,9 @@ import (
 	ft "github.com/leisure-tools/lazyfingertree"
 )
 
+// const START_ID = " start "
+const START_ID = ""
+
 ///
 /// types
 ///
@@ -48,9 +51,11 @@ type Operation interface {
 	fmt.Stringer
 }
 
+// TODO: maybe index wth ReplId so we can quickly find operations
 type Measure struct {
 	Width   int
 	Markers Set[string]
+	Ids     Set[string]
 }
 
 type DeleteOp struct {
@@ -113,6 +118,10 @@ func (s Set[T]) ToSlice() []T {
 }
 
 func (s Set[T]) Merge(s2 Set[T]) Set[T] {
+	if s == nil && len(s2) > 0 {
+		// this won't alter the receiver but the returned set will at least be correct
+		s = NewSet[T]()
+	}
 	for k, v := range s2 {
 		s[k] = v
 	}
@@ -132,7 +141,11 @@ func (s Set[T]) Union(s2 Set[T]) Set[T] {
 	return s.Copy().Merge(s2)
 }
 
-func (s Set[T]) Compliment(s2 Set[T]) Set[T] {
+func (s Set[T]) Complement(s2 Set[T]) Set[T] {
+	return s.Copy().Subtract(s2)
+}
+
+func (s Set[T]) Subtract(s2 Set[T]) Set[T] {
 	for item := range s2 {
 		delete(s, item)
 	}
@@ -155,6 +168,18 @@ func (s Set[T]) Remove(els ...T) Set[T] {
 
 func (s Set[T]) Has(el T) bool {
 	return s[el]
+}
+
+func (s Set[T]) Intersects(s2 Set[T]) bool {
+	if len(s2) < len(s) {
+		s, s2 = s2, s
+	}
+	for item := range s {
+		if s2.Has(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Set[T]) IsEmpty() bool {
@@ -227,6 +252,7 @@ func (m OpMeasurer) Sum(a Measure, b Measure) Measure {
 	return Measure{
 		Width:   a.Width + b.Width,
 		Markers: a.Markers.Union(b.Markers),
+		Ids:     a.Ids.Union(b.Ids),
 	}
 }
 
@@ -271,6 +297,15 @@ func (d *DeleteOp) String() string {
 	return ""
 }
 
+func (d *DeleteOp) HasDeleterIn(dels Set[string]) bool {
+	for _, d := range d.Deleters {
+		if dels.Has(d) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *DeleteOp) HasDeleter(del string) bool {
 	for _, d := range d.Deleters {
 		if d == del {
@@ -312,7 +347,9 @@ func (d *DeleteOp) Len() int {
 }
 
 func (d *DeleteOp) Measure() Measure {
-	return Measure{}
+	return Measure{
+		Ids: NewSet(d.Deleters...).Add(d.Id.Owner),
+	}
 }
 
 func (d *DeleteOp) Merge(m *Merger) bool {
@@ -348,7 +385,10 @@ func (i *InsertOp) GetText() string {
 }
 
 func (i *InsertOp) Measure() Measure {
-	return Measure{Width: len(i.Text)}
+	return Measure{
+		Width: len(i.Text),
+		Ids:   NewSet(i.Id.Owner),
+	}
 }
 
 func (i *InsertOp) Merge(m *Merger) bool {
@@ -387,7 +427,7 @@ func (m *MarkerOp) GetText() string {
 }
 
 func (m *MarkerOp) GetId() ReplId {
-	return ReplId{"", 0}
+	return ReplId{}
 }
 
 func (m *MarkerOp) CopyWith(offset int, text string) Operation {
@@ -404,7 +444,7 @@ func (opA *MarkerOp) Merge(m *Merger) bool {
 	if isBMarker {
 		n.Union(mar.Names)
 	}
-	n.Compliment(m.Marked)
+	n.Subtract(m.Marked)
 	if !n.IsEmpty() {
 		m.appendOps(&MarkerOp{n})
 	}
@@ -825,7 +865,13 @@ func NewDocument(text ...string) *Document {
 		for _, t := range text {
 			sb.WriteString(t)
 		}
-		return &Document{newOpTree(&InsertOp{Text: sb.String()}), make(map[string]string, 8)}
+		return &Document{
+			newOpTree(&InsertOp{
+				Id:   ReplId{START_ID, 0},
+				Text: sb.String(),
+			}),
+			make(map[string]string, 8),
+		}
 	}
 	return &Document{newOpTree(), make(map[string]string, 8)}
 }
@@ -907,7 +953,7 @@ func (d *Document) OriginalString() string {
 	for _, item := range d.ops.ToSlice() {
 		switch op := item.(type) {
 		case *DeleteOp, *InsertOp:
-			if op.GetId().Owner == "" {
+			if op.GetId().Owner == START_ID {
 				fmt.Fprint(sb, op.GetText())
 			}
 		}
@@ -948,7 +994,7 @@ func Changes(prefix string, ops OpTree) string {
 		case *DeleteOp:
 			printOp(sb, prefix, "-", op.Text, op.Id.Owner, op.Deleters)
 		case *InsertOp:
-			if op.Id.Owner == "" {
+			if op.Id.Owner == START_ID {
 				printOp(sb, prefix, "=", op.Text, op.Id.Owner, nil)
 			} else {
 				printOp(sb, prefix, "+", op.Text, op.Id.Owner, nil)
@@ -1053,7 +1099,7 @@ func Isa[T any](v any) bool {
 //		left = left.RemoveLast()
 //		switch op := last.(type) {
 //		case *InsertOp:
-//			if op.Id == "" {
+//			if op.Id == START_ID {
 //				break loop
 //			}
 //		case *DeleteOp:
@@ -1155,6 +1201,10 @@ func (d *Document) Merge(b *Document) {
 	d.SetOps(m.Result)
 }
 
+func (d *Document) HasMarker(name string) bool {
+	return d.ops.Measure().Markers.Has(name)
+}
+
 func (d *Document) SplitOnMarker(name string) (OpTree, OpTree) {
 	return SplitOnMarker(d.ops, name)
 }
@@ -1180,11 +1230,11 @@ func (d *Document) ReverseEdits() []Replacement {
 	d.ops.EachReverse(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
-			if Owner(op) == "" {
+			if Owner(op) == START_ID {
 				repl.Text = op.Text + repl.Text
 			}
 		case *InsertOp:
-			if op.Id.Owner == "" {
+			if op.Id.Owner == START_ID {
 				if repl.Length > 0 || len(repl.Text) > 0 {
 					repl.Offset = offset
 					edits = append(edits, repl)
@@ -1206,16 +1256,16 @@ func (d *Document) ReverseEdits() []Replacement {
 }
 
 // insert <--> delete
-// newBase ops are transformed to ""
-// "" ops are transformed to oldBase
+// newBase ops are transformed to START
+// START ops are transformed to oldBase
 func (d *Document) Reversed(oldBase, newBase string) *Document {
 	tree := emptyOpTree
 	d.ops.Each(func(oldOp Operation) bool {
 		owner := Owner(oldOp)
-		if owner == "" {
+		if owner == START_ID {
 			owner = oldBase
 		} else if owner == newBase {
-			owner = ""
+			owner = START_ID
 		}
 		id := ReplId{owner, ReplOffset(oldOp)}
 		switch op := oldOp.(type) {
@@ -1250,12 +1300,12 @@ func (d *Document) Edits() []Replacement {
 	d.ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
-			if Owner(op) == "" {
+			if Owner(op) == START_ID {
 				ensureRepl()
 				repl.Length += len(op.Text)
 			}
 		case *InsertOp:
-			if op.Id.Owner == "" {
+			if op.Id.Owner == START_ID {
 				if hasRepl {
 					edits = append(edits, repl)
 					hasRepl = false
@@ -1275,8 +1325,7 @@ func (d *Document) Edits() []Replacement {
 }
 
 // return edits the owner made in this document
-func (d *Document) EditsFor(owner string, markers ...string) ([]Replacement, map[string]int) {
-	markerSet := NewSet(markers...)
+func (d *Document) EditsFor(owners Set[string], markers Set[string]) ([]Replacement, map[string]int) {
 	edits := make([]Replacement, 0, 8)
 	hasRepl := false
 	var repl Replacement
@@ -1299,13 +1348,12 @@ func (d *Document) EditsFor(owner string, markers ...string) ([]Replacement, map
 	d.ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
-			//if Owner(op) == owner {
-			if op.HasDeleter(owner) {
+			if op.HasDeleterIn(owners) {
 				ensureRepl()
 				repl.Length += len(op.Text)
 			}
 		case *InsertOp:
-			if op.Id.Owner == owner {
+			if owners.Has(op.Id.Owner) {
 				ensureRepl()
 				repl.Text += op.Text
 			} else {
@@ -1314,7 +1362,7 @@ func (d *Document) EditsFor(owner string, markers ...string) ([]Replacement, map
 			offset += len(op.Text)
 		case *MarkerOp:
 			for k := range op.Names {
-				if markerSet.Has(k) {
+				if markers.Intersects(op.Names) {
 					markerPositions[k] = offset
 				}
 			}
@@ -1329,9 +1377,9 @@ func (d *Document) EditsFor(owner string, markers ...string) ([]Replacement, map
 
 func prevRetain(ops []Operation) *InsertOp {
 	for i := len(ops) - 2; i >= 0; i-- {
-		if op, isIns := ops[i].(*InsertOp); isIns && Owner(op) == "" {
+		if op, isIns := ops[i].(*InsertOp); isIns && Owner(op) == START_ID {
 			return op
-		} else if op, isDel := ops[i].(*DeleteOp); isDel && Owner(op) == "" {
+		} else if op, isDel := ops[i].(*DeleteOp); isDel && Owner(op) == START_ID {
 			return nil
 		}
 	}
@@ -1370,8 +1418,8 @@ func (d *Document) Simplify() {
 		prev := processed[len(processed)-2]
 		switch op := cur.(type) {
 		case *InsertOp:
-			if Owner(op) == "" {
-				if prevRet, ok := prev.(*InsertOp); ok && Owner(prevRet) == "" {
+			if Owner(op) == START_ID {
+				if prevRet, ok := prev.(*InsertOp); ok && Owner(prevRet) == START_ID {
 					// absorb retain into the previous one
 					processed = processed[:len(processed)-1]
 					processed[len(processed)-1] = &InsertOp{Text: prevRet.Text + op.Text}
@@ -1410,7 +1458,7 @@ func removeTrivialDeletes(ops OpTree) OpTree {
 	replMap := getEdits(ops)
 	allDeletes := NewSet[string]()
 	for owner, ops := range replMap {
-		if owner != "" && ops.Measure().Width == 0 {
+		if owner != START_ID && ops.Measure().Width == 0 {
 			allDeletes.Add(owner)
 		}
 	}
@@ -1434,7 +1482,7 @@ func (d *Document) Apply(id string, offset int, edits []Replacement) {
 }
 
 func Apply(id, str string, offset int, repl []Replacement) string {
-	doc := NewDocument(id, str)
+	doc := NewDocument(str)
 	doc.Apply(id, offset, repl)
 	return doc.String()
 }
