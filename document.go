@@ -166,8 +166,25 @@ func (s Set[T]) Remove(els ...T) Set[T] {
 	return s
 }
 
-func (s Set[T]) Has(el T) bool {
-	return s[el]
+func (s Set[T]) Has(els ...T) bool {
+	for _, el := range els {
+		if !s[el] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s Set[T]) Contains(s2 Set[T]) bool {
+	if len(s) < len(s2) {
+		return false
+	}
+	for item := range s2 {
+		if !s.Has(item) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s Set[T]) Intersects(s2 Set[T]) bool {
@@ -1348,7 +1365,7 @@ func (d *Document) EditsFor(owners Set[string], markers Set[string]) ([]Replacem
 	d.ops.Each(func(op Operation) bool {
 		switch op := op.(type) {
 		case *DeleteOp:
-			if op.HasDeleterIn(owners) {
+			if owners.Has(op.Deleters...) {
 				ensureRepl()
 				repl.Length += len(op.Text)
 			}
